@@ -733,6 +733,8 @@ void tcp_send_window_probe(struct sock *sk);
  * Deliver a 32bit value for TCP timestamp option (RFC 7323)
  * It is no longer tied to jiffies, but to 1 ms clock.
  * Note: double check if you want to use tcp_jiffies32 instead of this.
+/* Generator for TCP TS option (RFC 7323)
+ * Currently tied to 'jiffies' but will soon be driven by 1 ms clock.
  */
 #define TCP_TS_HZ	1000
 
