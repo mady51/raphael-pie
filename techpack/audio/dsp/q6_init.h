@@ -52,6 +52,10 @@ static inline void msm_mdf_exit(void)
 void crus_sp_exit(void);
 #endif
 
+#ifdef CONFIG_MSM_CSPL
+void crus_sp_exit(void);
+#endif
+
 void avtimer_exit(void);
 void audio_slimslave_exit(void);
 void msm_audio_ion_exit(void);

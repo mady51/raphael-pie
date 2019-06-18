@@ -170,7 +170,7 @@ CDEFINES +=	-DANI_LITTLE_BYTE_ENDIAN \
 		-Werror\
 		-D__linux__
 
-ifeq ($(PRODUCT_BUILD_INTERNATIONAL),true)
+ifeq ($(MIUI_CURRENT_CUST_VARIANT),global)
 CDEFINES += -DGOOGLE_HOTWORD
 endif
 

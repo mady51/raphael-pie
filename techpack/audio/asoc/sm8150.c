@@ -42,9 +42,6 @@
 #include "codecs/wsa881x.h"
 #include "codecs/wcd-mbhc-v2.h"
 #include <soc/qcom/socinfo.h>
-#ifdef CONFIG_SND_SOC_TFA9874_FOR_DAVI
-#include "codecs/tfa98xx/inc/tfa_platform_interface_definition.h"
-#endif
 
 #define DRV_NAME "sm8150-asoc-snd"
 
@@ -83,6 +80,8 @@
 #if 0
 static atomic_t cs35l41_mclk_rsc_ref;
 #endif
+
+#define CS35L41_CODEC_NAME "cs35l41.0-0040"
 
 #define ADSP_STATE_READY_TIMEOUT_MS 3000
 #define MSM_LL_QOS_VALUE 300 /* time in us to ensure LPM doesn't go in C3/C4 */
@@ -3146,6 +3145,9 @@ static const struct snd_kcontrol_new msm_snd_controls[] = {
 			msm_aux_pcm_tx_format_get, msm_aux_pcm_tx_format_put),
 	SOC_ENUM_EXT("HiFi Function", hifi_function, msm_hifi_get,
 			msm_hifi_put),
+	SOC_SINGLE_MULTI_EXT("TDM Slot Map", SND_SOC_NOPM, 0, 255, 0, 4,
+	NULL, tdm_slot_map_put),
+
 	SOC_SINGLE_EXT("USB Headset Direction", 0, 0, UINT_MAX, 0,
 					usbhs_direction_get, NULL),
 };
@@ -5137,6 +5139,11 @@ static int msm_mi2s_snd_startup(struct snd_pcm_substream *substream)
 					__func__, ret_pinctrl);
 		}
 	}
+
+	snd_soc_codec_set_sysclk(rtd->codec_dai->codec, 0, 0,
+			mi2s_clk[index].clk_freq_in_hz,
+			SND_SOC_CLOCK_IN);
+
 clk_off:
 	if (ret < 0)
 		msm_mi2s_set_sclk(substream, false);
@@ -6054,6 +6061,36 @@ static struct snd_soc_dai_link msm_common_misc_fe_dai_links[] = {
 		.codec_dai_name = "snd-soc-dummy-dai",
 		.codec_name = "snd-soc-dummy",
 	},
+	{
+		.name = "Quaternary MI2S_RX Hostless Playback",
+		.stream_name = "Quaternary MI2S_RX Hostless Playback",
+		.cpu_dai_name = "QUAT_MI2S_RX_HOSTLESS",
+		.platform_name = "msm-pcm-hostless",
+		.dynamic = 1,
+		.dpcm_playback = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+		.ignore_suspend = 1,
+		.ignore_pmdown_time = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+	},
+	{
+		.name = "Quaternary MI2S_TX Hostless Capture",
+		.stream_name = "Quaternary MI2S_TX Hostless Capture",
+		.cpu_dai_name = "QUAT_MI2S_TX_HOSTLESS",
+		.platform_name = "msm-pcm-hostless",
+		.dynamic = 1,
+		.dpcm_capture = 1,
+		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
+			SND_SOC_DPCM_TRIGGER_POST},
+		.no_host_mode = SND_SOC_DAI_LINK_NO_HOST,
+		.ignore_suspend = 1,
+		.ignore_pmdown_time = 1,
+		.codec_dai_name = "snd-soc-dummy-dai",
+		.codec_name = "snd-soc-dummy",
+	},
 };
 
 static struct snd_soc_dai_link msm_common_be_dai_links[] = {
@@ -6882,14 +6919,14 @@ static struct snd_soc_dai_link msm_mi2s_be_dai_links[] = {
 
 };
 
-static struct snd_soc_dai_link quat_mi2s_rx_tfa9874_dai_links[] = {
+static struct snd_soc_dai_link quat_mi2s_rx_cs35l41_dai_links[] = {
 	{
 		.name = LPASS_BE_QUAT_MI2S_RX,
 		.stream_name = "Quaternary MI2S Playback",
 		.cpu_dai_name = "msm-dai-q6-mi2s.3",
 		.platform_name = "msm-pcm-routing",
-		.codec_name = "tfa98xx.1-0034",
-		.codec_dai_name = "tfa98xx-aif-1-34",
+		.codec_name = CS35L41_CODEC_NAME,
+		.codec_dai_name = "cs35l41-pcm",
 		.no_pcm = 1,
 		.dpcm_playback = 1,
 		.id = MSM_BACKEND_DAI_QUATERNARY_MI2S_RX,
@@ -6899,6 +6936,7 @@ static struct snd_soc_dai_link quat_mi2s_rx_tfa9874_dai_links[] = {
 		.ignore_pmdown_time = 1,
 	},
 };
+
 
 static struct snd_soc_dai_link msm_auxpcm_be_dai_links[] = {
 	/* Primary AUX PCM Backend DAI Links */
@@ -7062,7 +7100,7 @@ static struct snd_soc_dai_link msm_tavil_dai_links[
 			 ARRAY_SIZE(msm_wcn_be_dai_links) +
 			 ARRAY_SIZE(ext_disp_be_dai_link) +
 			 ARRAY_SIZE(msm_mi2s_be_dai_links) +
-			 ARRAY_SIZE(quat_mi2s_rx_tfa9874_dai_links) +
+			 ARRAY_SIZE(quat_mi2s_rx_cs35l41_dai_links) +
 			 ARRAY_SIZE(msm_auxpcm_be_dai_links)];
 
 static int msm_snd_card_tavil_late_probe(struct snd_soc_card *card)
@@ -7494,9 +7532,9 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 			total_links += ARRAY_SIZE(msm_mi2s_be_dai_links);
 
 			memcpy(msm_tavil_dai_links + total_links,
-				quat_mi2s_rx_tfa9874_dai_links,
-				sizeof(quat_mi2s_rx_tfa9874_dai_links));
-			total_links += ARRAY_SIZE(quat_mi2s_rx_tfa9874_dai_links);
+				quat_mi2s_rx_cs35l41_dai_links,
+				sizeof(quat_mi2s_rx_cs35l41_dai_links));
+			total_links += ARRAY_SIZE(quat_mi2s_rx_cs35l41_dai_links);
 		}
 
 		ret = of_property_read_u32(dev->of_node,

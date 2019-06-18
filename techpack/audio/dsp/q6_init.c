@@ -37,6 +37,7 @@ static int __init audio_q6_init(void)
 	msm_mdf_init();
 	elliptic_driver_init();
 	voice_mhi_init();
+	elliptic_driver_init();
 	return 0;
 }
 
@@ -60,6 +61,7 @@ static void __exit audio_q6_exit(void)
 	adsp_err_exit();
 	elliptic_driver_exit();
 	voice_mhi_exit();
+	elliptic_driver_exit();
 }
 
 module_init(audio_q6_init);

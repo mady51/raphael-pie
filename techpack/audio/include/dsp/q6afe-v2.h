@@ -224,6 +224,40 @@ enum {
 	IDX_AFE_PORT_ID_QUINARY_TDM_TX_6,
 	IDX_AFE_PORT_ID_QUINARY_TDM_RX_7,
 	IDX_AFE_PORT_ID_QUINARY_TDM_TX_7,
+	/* IDX 161 to 181 */
+	IDX_AFE_PORT_ID_WSA_CODEC_DMA_RX_0,
+	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_0,
+	IDX_AFE_PORT_ID_WSA_CODEC_DMA_RX_1,
+	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_1,
+	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_2,
+	IDX_AFE_PORT_ID_VA_CODEC_DMA_TX_0,
+	IDX_AFE_PORT_ID_VA_CODEC_DMA_TX_1,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_0,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_0,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_1,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_1,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_2,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_2,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_3,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_3,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_4,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_4,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_5,
+	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_5,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_6,
+	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_7,
+	/* IDX 182 to 184 */
+	IDX_SECONDARY_SPDIF_RX,
+	IDX_PRIMARY_SPDIF_TX,
+	IDX_SECONDARY_SPDIF_TX,
+
+        IDX_AFE_PORT_ID_PSEUDOPORT_01,
+	/* IDX 185 to 186 */
+	IDX_SLIMBUS_9_RX,
+	IDX_SLIMBUS_9_TX,
+	/* IDX 187 -> 189 */
+	IDX_AFE_PORT_ID_SENARY_PCM_RX,
+	IDX_AFE_PORT_ID_SENARY_PCM_TX,
 	AFE_MAX_PORTS
 };
 
@@ -388,4 +422,63 @@ int afe_tdm_port_start(u16 port_id, struct afe_tdm_port_config *tdm_port,
 void afe_set_routing_callback(routing_cb cb);
 int afe_get_av_dev_drift(struct afe_param_id_dev_timing_stats *timing_stats,
 		u16 port);
+int afe_get_sp_rx_tmax_xmax_logging_data(
+		struct afe_sp_rx_tmax_xmax_logging_param *xt_logging,
+		u16 port_id);
+int afe_cal_init_hwdep(void *card);
+int afe_send_port_island_mode(u16 port_id);
+
+#ifdef CONFIG_MSM_CSPL
+int afe_apr_send_pkt_crus(void *data, int index, int set);
+int crus_afe_port_close(u16 port_id);
+int crus_afe_port_start(u16 port_id);
+#endif
+
+int afe_send_cmd_wakeup_register(void *handle, bool enable);
+void afe_register_wakeup_irq_callback(
+	void (*afe_cb_wakeup_irq)(void *handle));
+
+#define AFE_LPASS_CORE_HW_BLOCK_ID_NONE                        0
+#define AFE_LPASS_CORE_HW_BLOCK_ID_AVTIMER                     2
+#define AFE_LPASS_CORE_HW_MACRO_BLOCK                          3
+
+/* Handles audio-video timer (avtimer) and BTSC vote requests from clients */
+#define AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST            0x000100f4
+
+struct afe_cmd_remote_lpass_core_hw_vote_request {
+	struct apr_hdr hdr;
+	uint32_t  hw_block_id;
+	/* ID of the hardware block. */
+	char client_name[8];
+	/* Name of the client. */
+} __packed;
+
+#define AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST        0x000100f5
+
+struct afe_cmd_rsp_remote_lpass_core_hw_vote_request {
+	uint32_t client_handle;
+	/**< Handle of the client. */
+} __packed;
+
+#define AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST            0x000100f6
+
+struct afe_cmd_remote_lpass_core_hw_devote_request {
+	struct apr_hdr hdr;
+	uint32_t  hw_block_id;
+	/**< ID of the hardware block.*/
+
+	uint32_t client_handle;
+	/**< Handle of the client.*/
+} __packed;
+
+int afe_vote_lpass_core_hw(uint32_t hw_block_id, char *client_name,
+			uint32_t *client_handle);
+int afe_unvote_lpass_core_hw(uint32_t hw_block_id, uint32_t client_handle);
+int afe_get_spk_initial_cal(void);
+void afe_get_spk_r0(int *spk_r0);
+void afe_get_spk_t0(int *spk_t0);
+int afe_get_spk_v_vali_flag(void);
+void afe_get_spk_v_vali_sts(int *spk_v_vali_sts);
+void afe_set_spk_initial_cal(int initial_cal);
+void afe_set_spk_v_vali_flag(int v_vali_flag);
 #endif /* __Q6AFE_V2_H__ */

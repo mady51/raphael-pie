@@ -2464,6 +2464,19 @@ int adm_open(int port_id, int path, int rate, int channel_mode, int topology,
 	    (topology == VPM_TX_DM_FLUENCE_COPP_TOPOLOGY) ||
 	    (topology == VPM_TX_DM_RFECNS_COPP_TOPOLOGY))
 		rate = 16000;
+	}
+
+	if (topology == FFECNS_TOPOLOGY) {
+		this_adm.ffecns_port_id = port_id;
+		pr_debug("%s: ffecns port id =%x\n", __func__,
+				this_adm.ffecns_port_id);
+	}
+
+	if (topology == VPM_TX_VOICE_SMECNS_V2_COPP_TOPOLOGY ||
+		topology == ADM_TOPOLOGY_ID_AUDIO_RX_FVSAM) {
+		pr_debug("%s: set channel_mode as 1 for topology=%d\n", __func__, topology);
+		channel_mode = 1;
+	}
 
 	/*
 	 * Routing driver reuses the same adm for streams with the same

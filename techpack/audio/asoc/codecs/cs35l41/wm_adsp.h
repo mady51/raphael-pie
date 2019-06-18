@@ -2,7 +2,6 @@
  * wm_adsp.h  --  Wolfson ADSP support
  *
  * Copyright 2012 Wolfson Microelectronics plc
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * Author: Mark Brown <broonie@opensource.wolfsonmicro.com>
  *
@@ -69,6 +68,7 @@ struct wm_adsp {
 	int cal_status;
 	int cal_chksum;
 	int block_bypass;
+	int block_bypass_in_enh;
 	int base;
 	int base_sysinfo;
 	int sysclk_reg;

@@ -402,19 +402,12 @@ static int wdsp_download_segments(struct wdsp_mgr_priv *wdsp,
 		return -EINVAL;
 	}
 
-	do {
-		ret = wdsp_get_segment_list(ctl->cdev, wdsp->img_fname,
-					    type, wdsp->seg_list,
-					    &wdsp->base_addr);
-		if (ret == -EAGAIN)
-			WDSP_ERR(wdsp,
-				 "Retrying, retry_cnt %d error %d type %d",
-				 retry_cnt, ret, type);
-	} while (ret == -EAGAIN && retry_cnt-- > 0);
-
-	if (ret < 0 || list_empty(wdsp->seg_list)) {
-		WDSP_ERR(wdsp,
-			"Failed to load image, error %d, segment-type %d",
+	ret = wdsp_get_segment_list(ctl->cdev, wdsp->img_fname,
+				    type, wdsp->seg_list, &wdsp->base_addr);
+	pr_info("%s: downloading wdsp firmware: %s.\n", __func__, wdsp->img_fname);
+	if (ret < 0 ||
+	    list_empty(wdsp->seg_list)) {
+		WDSP_ERR(wdsp, "Error %d to get image segments for type %d",
 			 ret, type);
 
 		wdsp_broadcast_event_downseq(wdsp, WDSP_EVENT_DLOAD_FAILED,
@@ -1115,6 +1108,9 @@ static void wdsp_mgr_debugfs_init(struct wdsp_mgr_priv *wdsp)
 
 	debugfs_create_bool("panic_on_error", 0644,
 			    wdsp->entry, &wdsp->panic_on_error);
+
+	debugfs_create_u32("wdsp_status", S_IRUGO,
+			    wdsp->entry, &wdsp->status);
 }
 
 static void wdsp_mgr_debugfs_remove(struct wdsp_mgr_priv *wdsp)
@@ -1252,6 +1248,13 @@ static int wdsp_mgr_parse_dt_entries(struct wdsp_mgr_priv *wdsp)
 			 "qcom,img-filename", ret);
 		return ret;
 	}
+
+#ifdef GOOGLE_HOTWORD
+	wdsp->img_fname  = "cpe_intl";
+	pr_info("%s: using global wdsp fw: %s.\n", __func__, wdsp->img_fname);
+#else
+	pr_info("%s: using non-global wdsp fw: %s.\n", __func__, wdsp->img_fname);
+#endif
 
 	ret = of_count_phandle_with_args(dev->of_node,
 					 "qcom,wdsp-components",
