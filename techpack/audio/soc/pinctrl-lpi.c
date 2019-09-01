@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2016-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,15 +21,10 @@
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/types.h>
-#include <linux/clk.h>
-#include <soc/snd_event.h>
-#include <linux/pm_runtime.h>
 #include <dsp/audio_notifier.h>
 
 #include "core.h"
 #include "pinctrl-utils.h"
-
-#define LPI_AUTO_SUSPEND_DELAY          100 /* delay in msec */
 
 #define LPI_ADDRESS_SIZE			0x20000
 
@@ -64,7 +59,6 @@
 #define LPI_GPIO_FUNC_FUNC5			"func5"
 
 static bool lpi_dev_up;
-static struct device *lpi_dev;
 
 /* The index of each function in lpi_gpio_functions[] array */
 enum lpi_gpio_func_index {
@@ -101,7 +95,6 @@ struct lpi_gpio_state {
 	struct pinctrl_dev *ctrl;
 	struct gpio_chip chip;
 	char __iomem	*base;
-	struct clk *lpass_core_hw_vote;
 };
 
 static const char *const lpi_gpio_groups[] = {
@@ -112,8 +105,40 @@ static const char *const lpi_gpio_groups[] = {
 	"gpio29", "gpio30", "gpio31",
 };
 
-#define LPI_TLMM_MAX_PINS 100
-static u32 lpi_offset[LPI_TLMM_MAX_PINS];
+static const u32 lpi_offset[] = {
+	0x00000000,
+	0x00001000,
+	0x00002000,
+	0x00003000,
+	0x00004000,
+	0x00005000,
+	0x00006000,
+	0x00007000,
+	0x00008000,
+	0x00009000,
+	0x0000A000,
+	0x0000B000,
+	0x0000C000,
+	0x0000D000,
+	0x0000E000,
+	0x0000F000,
+	0x00010000,
+	0x00011000,
+	0x00012000,
+	0x00013000,
+	0x00014000,
+	0x00015000,
+	0x00016000,
+	0x00017000,
+	0x00018000,
+	0x00019000,
+	0x0001A000,
+	0x0001B000,
+	0x0001C000,
+	0x0001D000,
+	0x0001E000,
+	0x0001F000,
+};
 
 static const char *const lpi_gpio_functions[] = {
 	[LPI_GPIO_FUNC_INDEX_GPIO]	= LPI_GPIO_FUNC_GPIO,
@@ -133,14 +158,11 @@ static int lpi_gpio_read(struct lpi_gpio_pad *pad, unsigned int addr)
 				   __func__);
 		return 0;
 	}
-	pm_runtime_get_sync(lpi_dev);
 
 	ret = ioread32(pad->base + pad->offset + addr);
 	if (ret < 0)
 		pr_err("%s: read 0x%x failed\n", __func__, addr);
 
-	pm_runtime_mark_last_busy(lpi_dev);
-	pm_runtime_put_autosuspend(lpi_dev);
 	return ret;
 }
 
@@ -152,12 +174,8 @@ static int lpi_gpio_write(struct lpi_gpio_pad *pad, unsigned int addr,
 				   __func__);
 		return 0;
 	}
-	pm_runtime_get_sync(lpi_dev);
 
 	iowrite32(val, pad->base + pad->offset + addr);
-
-	pm_runtime_mark_last_busy(lpi_dev);
-	pm_runtime_put_autosuspend(lpi_dev);
 	return 0;
 }
 
@@ -398,14 +416,12 @@ static int lpi_notifier_service_cb(struct notifier_block *this,
 			initial_boot = false;
 			break;
 		}
-		snd_event_notify(lpi_dev, SND_EVENT_DOWN);
 		lpi_dev_up = false;
 		break;
 	case AUDIO_NOTIFIER_SERVICE_UP:
 		if (initial_boot)
 			initial_boot = false;
 		lpi_dev_up = true;
-		snd_event_notify(lpi_dev, SND_EVENT_UP);
 		break;
 	default:
 		break;
@@ -416,15 +432,6 @@ static int lpi_notifier_service_cb(struct notifier_block *this,
 static struct notifier_block service_nb = {
 	.notifier_call  = lpi_notifier_service_cb,
 	.priority = -INT_MAX,
-};
-
-static void lpi_pinctrl_ssr_disable(struct device *dev, void *data)
-{
-	lpi_dev_up = false;
-}
-
-static const struct snd_event_ops lpi_pinctrl_ssr_ops = {
-	.disable = lpi_pinctrl_ssr_disable,
 };
 
 #ifdef CONFIG_DEBUG_FS
@@ -511,7 +518,6 @@ static int lpi_pinctrl_probe(struct platform_device *pdev)
 	int ret, npins, i;
 	char __iomem *lpi_base;
 	u32 reg;
-	struct clk *lpass_core_hw_vote = NULL;
 
 	ret = of_property_read_u32(dev->of_node, "reg", &reg);
 	if (ret < 0) {
@@ -524,13 +530,6 @@ static int lpi_pinctrl_probe(struct platform_device *pdev)
 		return ret;
 
 	WARN_ON(npins > ARRAY_SIZE(lpi_gpio_groups));
-
-	ret = of_property_read_u32_array(dev->of_node, "qcom,lpi-offset-tbl",
-					 lpi_offset, npins);
-	if (ret < 0) {
-		dev_err(dev, "error in reading lpi offset table: %d\n", ret);
-		return ret;
-	}
 
 	state = devm_kzalloc(dev, sizeof(*state), GFP_KERNEL);
 	if (!state)
@@ -602,7 +601,6 @@ static int lpi_pinctrl_probe(struct platform_device *pdev)
 		goto err_range;
 	}
 
-	lpi_dev = &pdev->dev;
 	lpi_dev_up = true;
 	ret = audio_notifier_register("lpi_tlmm", AUDIO_NOTIFIER_ADSP_DOMAIN,
 				      &service_nb);
@@ -612,35 +610,8 @@ static int lpi_pinctrl_probe(struct platform_device *pdev)
 		goto err_range;
 	}
 
-	ret = snd_event_client_register(dev, &lpi_pinctrl_ssr_ops, NULL);
-	if (!ret) {
-		snd_event_notify(dev, SND_EVENT_UP);
-	} else {
-		dev_err(dev, "%s: snd_event registration failed, ret [%d]\n",
-			__func__, ret);
-		goto err_snd_evt;
-	}
-
-	/* Register LPASS core hw vote */
-	lpass_core_hw_vote = devm_clk_get(&pdev->dev, "lpass_core_hw_vote");
-	if (IS_ERR(lpass_core_hw_vote)) {
-		ret = PTR_ERR(lpass_core_hw_vote);
-		dev_dbg(&pdev->dev, "%s: clk get %s failed %d\n",
-			__func__, "lpass_core_hw_vote", ret);
-		lpass_core_hw_vote = NULL;
-		ret = 0;
-	}
-	state->lpass_core_hw_vote = lpass_core_hw_vote;
-
-	pm_runtime_set_autosuspend_delay(&pdev->dev, LPI_AUTO_SUSPEND_DELAY);
-	pm_runtime_use_autosuspend(&pdev->dev);
-	pm_runtime_set_suspended(&pdev->dev);
-	pm_runtime_enable(&pdev->dev);
-
 	return 0;
 
-err_snd_evt:
-	audio_notifier_deregister("lpi_tlmm");
 err_range:
 	gpiochip_remove(&state->chip);
 err_chip:
@@ -650,10 +621,7 @@ err_chip:
 static int lpi_pinctrl_remove(struct platform_device *pdev)
 {
 	struct lpi_gpio_state *state = platform_get_drvdata(pdev);
-	pm_runtime_disable(&pdev->dev);
-	pm_runtime_set_suspended(&pdev->dev);
 
-	snd_event_client_deregister(&pdev->dev);
 	audio_notifier_deregister("lpi_tlmm");
 	gpiochip_remove(&state->chip);
 	return 0;
@@ -666,49 +634,9 @@ static const struct of_device_id lpi_pinctrl_of_match[] = {
 
 MODULE_DEVICE_TABLE(of, lpi_pinctrl_of_match);
 
-static int lpi_pinctrl_runtime_resume(struct device *dev)
-{
-	struct lpi_gpio_state *state = dev_get_drvdata(dev);
-	int ret = 0;
-
-	if (state->lpass_core_hw_vote == NULL) {
-		dev_dbg(dev, "%s: Invalid core hw node\n", __func__);
-		return 0;
-	}
-
-	ret = clk_prepare_enable(state->lpass_core_hw_vote);
-	if (ret < 0)
-		dev_dbg(dev, "%s:lpass core hw enable failed\n",
-			__func__);
-
-	pm_runtime_set_autosuspend_delay(dev, LPI_AUTO_SUSPEND_DELAY);
-	return 0;
-}
-
-static int lpi_pinctrl_runtime_suspend(struct device *dev)
-{
-	struct lpi_gpio_state *state = dev_get_drvdata(dev);
-
-	if (state->lpass_core_hw_vote == NULL) {
-		dev_dbg(dev, "%s: Invalid lpass core hw node\n", __func__);
-		return 0;
-	}
-	clk_disable_unprepare(state->lpass_core_hw_vote);
-	return 0;
-}
-
-static const struct dev_pm_ops lpi_pinctrl_dev_pm_ops = {
-	SET_RUNTIME_PM_OPS(
-		lpi_pinctrl_runtime_suspend,
-		lpi_pinctrl_runtime_resume,
-		NULL
-	)
-};
-
 static struct platform_driver lpi_pinctrl_driver = {
 	.driver = {
 		   .name = "qcom-lpi-pinctrl",
-		   .pm = &lpi_pinctrl_dev_pm_ops,
 		   .of_match_table = lpi_pinctrl_of_match,
 	},
 	.probe = lpi_pinctrl_probe,

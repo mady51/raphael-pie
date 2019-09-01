@@ -1,4 +1,4 @@
-/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2012-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -32,7 +32,6 @@
 #include <dsp/q6adm-v2.h>
 #include "msm-pcm-afe-v2.h"
 
-#define TIMEOUT_MS	1000
 #define MIN_PLAYBACK_PERIOD_SIZE (128 * 2)
 #define MAX_PLAYBACK_PERIOD_SIZE (128 * 2 * 2 * 6)
 #define MIN_PLAYBACK_NUM_PERIODS (4)
@@ -490,20 +489,20 @@ static int msm_afe_open(struct snd_pcm_substream *substream)
 }
 
 static int msm_afe_playback_copy(struct snd_pcm_substream *substream,
-				int channel, unsigned long hwoff,
-				void __user *buf, unsigned long fbytes)
+				int channel, snd_pcm_uframes_t hwoff,
+				void __user *buf, snd_pcm_uframes_t frames)
 {
 	int ret = 0;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct pcm_afe_info *prtd = runtime->private_data;
-	char *hwbuf = runtime->dma_area + hwoff;
+	char *hwbuf = runtime->dma_area + frames_to_bytes(runtime, hwoff);
 	u32 mem_map_handle = 0;
 
 	pr_debug("%s : appl_ptr 0x%lx hw_ptr 0x%lx dest_to_copy 0x%pK\n",
 		__func__,
 		runtime->control->appl_ptr, runtime->status->hw_ptr, hwbuf);
 
-	if (copy_from_user(hwbuf, buf, fbytes)) {
+	if (copy_from_user(hwbuf, buf, frames_to_bytes(runtime, frames))) {
 		pr_err("%s :Failed to copy audio from user buffer\n",
 			__func__);
 
@@ -543,13 +542,13 @@ fail:
 }
 
 static int msm_afe_capture_copy(struct snd_pcm_substream *substream,
-				int channel, unsigned long hwoff,
-				void __user *buf, unsigned long fbytes)
+				int channel, snd_pcm_uframes_t hwoff,
+				void __user *buf, snd_pcm_uframes_t frames)
 {
 	int ret = 0;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct pcm_afe_info *prtd = runtime->private_data;
-	char *hwbuf = runtime->dma_area + hwoff;
+	char *hwbuf = runtime->dma_area + frames_to_bytes(runtime, hwoff);
 	u32 mem_map_handle = 0;
 
 	if (!prtd->mmap_flag) {
@@ -578,8 +577,7 @@ static int msm_afe_capture_copy(struct snd_pcm_substream *substream,
 
 		prtd->dsp_cnt++;
 		ret = wait_event_timeout(prtd->read_wait,
-				atomic_read(&prtd->rec_bytes_avail),
-				msecs_to_jiffies(TIMEOUT_MS));
+				atomic_read(&prtd->rec_bytes_avail), 5 * HZ);
 		if (ret < 0) {
 			pr_err("%s: wait_event_timeout failed\n", __func__);
 
@@ -592,7 +590,7 @@ static int msm_afe_capture_copy(struct snd_pcm_substream *substream,
 			__func__, runtime->control->appl_ptr,
 			runtime->status->hw_ptr, hwbuf);
 
-	if (copy_to_user(buf, hwbuf, fbytes)) {
+	if (copy_to_user(buf, hwbuf, frames_to_bytes(runtime, frames))) {
 		pr_err("%s: copy to user failed\n", __func__);
 
 		goto fail;
@@ -604,8 +602,8 @@ fail:
 }
 
 static int msm_afe_copy(struct snd_pcm_substream *substream, int channel,
-			unsigned long hwoff, void __user *buf,
-			unsigned long fbytes)
+			snd_pcm_uframes_t hwoff, void __user *buf,
+			snd_pcm_uframes_t frames)
 {
 	struct snd_pcm_runtime *runtime = substream->runtime;
 	struct pcm_afe_info *prtd = runtime->private_data;
@@ -620,10 +618,10 @@ static int msm_afe_copy(struct snd_pcm_substream *substream, int channel,
 
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
 		ret = msm_afe_playback_copy(substream, channel, hwoff,
-					buf, fbytes);
+					buf, frames);
 	else if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
 		ret = msm_afe_capture_copy(substream, channel, hwoff,
-					buf, fbytes);
+					buf, frames);
 	return ret;
 }
 
@@ -843,7 +841,7 @@ static snd_pcm_uframes_t msm_afe_pointer(struct snd_pcm_substream *substream)
 
 static const struct snd_pcm_ops msm_afe_ops = {
 	.open           = msm_afe_open,
-	.copy_user      = msm_afe_copy,
+	.copy           = msm_afe_copy,
 	.hw_params	= msm_afe_hw_params,
 	.trigger	= msm_afe_trigger,
 	.close          = msm_afe_close,
@@ -906,17 +904,19 @@ static struct platform_driver msm_afe_driver = {
 	.remove = msm_afe_remove,
 };
 
-int __init msm_pcm_afe_init(void)
+static int __init msm_soc_platform_init(void)
 {
 	pr_debug("%s\n", __func__);
 	return platform_driver_register(&msm_afe_driver);
 }
+module_init(msm_soc_platform_init);
 
-void msm_pcm_afe_exit(void)
+static void __exit msm_soc_platform_exit(void)
 {
 	pr_debug("%s\n", __func__);
 	platform_driver_unregister(&msm_afe_driver);
 }
+module_exit(msm_soc_platform_exit);
 
 MODULE_DESCRIPTION("AFE PCM module platform driver");
 MODULE_LICENSE("GPL v2");

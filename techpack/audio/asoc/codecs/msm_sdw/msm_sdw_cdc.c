@@ -376,7 +376,7 @@ static int __msm_sdw_reg_read(struct msm_sdw_priv *msm_sdw, unsigned short reg,
 			((u8 *)dest)[i] = temp;
 		}
 		msm_sdw->int_mclk1_enabled = true;
-		schedule_delayed_work(&msm_sdw->disable_int_mclk1_work, 50);
+		queue_delayed_work(system_power_efficient_wq, &msm_sdw->disable_int_mclk1_work, 50);
 		goto unlock_exit;
 	}
 	for (i = 0; i < bytes; i++)  {
@@ -419,7 +419,7 @@ static int __msm_sdw_reg_write(struct msm_sdw_priv *msm_sdw, unsigned short reg,
 			ret = msm_sdw_ahb_write_device(msm_sdw, reg + (4 * i),
 						       &((u8 *)src)[i]);
 		msm_sdw->int_mclk1_enabled = true;
-		schedule_delayed_work(&msm_sdw->disable_int_mclk1_work, 50);
+		queue_delayed_work(system_power_efficient_wq, &msm_sdw->disable_int_mclk1_work, 50);
 		goto unlock_exit;
 	}
 	for (i = 0; i < bytes; i++)
@@ -1251,13 +1251,7 @@ static int msm_sdw_swrm_write(void *handle, int reg, int val)
 
 static int msm_sdw_swrm_clock(void *handle, bool enable)
 {
-	struct msm_sdw_priv *msm_sdw;
-
-	if (!handle) {
-		pr_err("%s: NULL handle\n", __func__);
-		return -EINVAL;
-	}
-	msm_sdw = (struct msm_sdw_priv *)handle;
+	struct msm_sdw_priv *msm_sdw = (struct msm_sdw_priv *) handle;
 
 	mutex_lock(&msm_sdw->sdw_clk_lock);
 
@@ -1940,7 +1934,6 @@ static void msm_sdw_add_child_devices(struct work_struct *work)
 			msm_sdw->nr = ctrl_num;
 			msm_sdw->sdw_ctrl_data = sdw_ctrl_data;
 		}
-		msm_sdw->pdev_child_devices[msm_sdw->child_count++] = pdev;
 	}
 
 	return;
@@ -2057,13 +2050,8 @@ err_sdw_cdc:
 static int msm_sdw_remove(struct platform_device *pdev)
 {
 	struct msm_sdw_priv *msm_sdw;
-	int count;
 
 	msm_sdw = dev_get_drvdata(&pdev->dev);
-
-	for (count = 0; count < msm_sdw->child_count &&
-				count < MSM_SDW_CHILD_DEVICES_MAX; count++)
-		platform_device_unregister(msm_sdw->pdev_child_devices[count]);
 
 	mutex_destroy(&msm_sdw->io_lock);
 	mutex_destroy(&msm_sdw->sdw_read_lock);
@@ -2071,7 +2059,6 @@ static int msm_sdw_remove(struct platform_device *pdev)
 	mutex_destroy(&msm_sdw->sdw_clk_lock);
 	mutex_destroy(&msm_sdw->codec_mutex);
 	mutex_destroy(&msm_sdw->cdc_int_mclk1_mutex);
-
 	devm_kfree(&pdev->dev, msm_sdw);
 	snd_soc_unregister_codec(&pdev->dev);
 	return 0;

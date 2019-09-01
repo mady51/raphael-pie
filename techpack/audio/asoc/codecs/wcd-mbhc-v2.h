@@ -1,5 +1,4 @@
 /* Copyright (c) 2014-2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -401,22 +400,6 @@ enum mbhc_hs_pullup_iref {
 	I_3P0_UA,
 };
 
-enum mbhc_hs_pullup_iref_v2 {
-	HS_PULLUP_I_DEFAULT = -1,
-	HS_PULLUP_I_3P0_UA = 0,
-	HS_PULLUP_I_2P25_UA,
-	HS_PULLUP_I_1P5_UA,
-	HS_PULLUP_I_0P75_UA,
-	HS_PULLUP_I_1P125_UA = 0x05,
-	HS_PULLUP_I_0P375_UA = 0x07,
-	HS_PULLUP_I_2P0_UA,
-	HS_PULLUP_I_1P0_UA = 0x0A,
-	HS_PULLUP_I_0P5_UA,
-	HS_PULLUP_I_0P25_UA = 0x0F,
-	HS_PULLUP_I_0P125_UA = 0x17,
-	HS_PULLUP_I_OFF,
-};
-
 enum mbhc_moisture_rref {
 	R_OFF,
 	R_24_KOHM,
@@ -428,15 +411,9 @@ struct usbc_ana_audio_config {
 	int usbc_en1_gpio;
 	int usbc_en2_gpio;
 	int usbc_force_gpio;
-	int euro_us_hw_switch_gpio;
-	int uart_audio_switch_gpio;
-	int subpcb_id_gpio;
 	struct device_node *usbc_en1_gpio_p; /* used by pinctrl API */
 	struct device_node *usbc_en2_gpio_p; /* used by pinctrl API */
 	struct device_node *usbc_force_gpio_p; /* used by pinctrl API */
-	struct device_node *euro_us_hw_switch_gpio_p; /* used by pinctrl API */
-	struct device_node *uart_audio_switch_gpio_p; /* used by pinctrl API */
-	struct device_node *subpcb_id_gpio_p; /* used by pinctrl API */
 };
 
 struct wcd_mbhc_config {
@@ -455,10 +432,6 @@ struct wcd_mbhc_config {
 	bool enable_anc_mic_detect;
 	u32 enable_usbc_analog;
 	struct usbc_ana_audio_config usbc_analog_cfg;
-	u32 use_fsa4476_gpio;
-	bool moisture_duty_cycle_en;
-	void (*enable_dual_adc_gpio)(struct device_node *node, bool en);
-	struct device_node *dual_adc_gpio_node;
 };
 
 struct wcd_mbhc_intr {
@@ -523,10 +496,6 @@ struct wcd_mbhc_cb {
 	void (*update_anc_state)(struct snd_soc_codec *codec,
 				 bool enable, int anc_num);
 	bool (*is_anc_on)(struct wcd_mbhc *mbhc);
-	void (*hph_pull_up_control_v2)(struct snd_soc_codec *, int);
-	bool (*mbhc_get_moisture_status)(struct wcd_mbhc *);
-	void (*mbhc_moisture_polling_ctrl)(struct wcd_mbhc *, bool);
-	void (*mbhc_moisture_detect_en)(struct wcd_mbhc *, bool);
 };
 
 struct wcd_mbhc_fn {
@@ -557,6 +526,7 @@ struct wcd_mbhc {
 	bool gnd_swh; /*track GND switch NC / NO */
 	u32 hs_thr;
 	u32 hph_thr;
+	u32 micb_mv;
 	u32 swap_thr;
 	u32 moist_vref;
 	u32 moist_iref;
@@ -607,7 +577,6 @@ struct wcd_mbhc {
 	struct completion btn_press_compl;
 	struct mutex hphl_pa_lock;
 	struct mutex hphr_pa_lock;
-	bool deinit_in_progress;
 
 	/* Holds mbhc detection method - ADC/Legacy */
 	unsigned int mbhc_detection_logic;
@@ -623,8 +592,6 @@ struct wcd_mbhc {
 
 	struct wcd_mbhc_fn *mbhc_fn;
 	bool force_linein;
-	struct device_node *fsa_np;
-	struct notifier_block fsa_nb;
 };
 
 void wcd_mbhc_find_plug_and_report(struct wcd_mbhc *mbhc,

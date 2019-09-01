@@ -20,7 +20,7 @@
 #define _MSM_PCM_H
 #include <dsp/apr_audio-v2.h>
 #include <dsp/q6asm-v2.h>
-#include "msm-pcm-routing-v2.h"
+
 
 
 /* Support unconventional sample rates 12000, 24000 as well */
@@ -105,7 +105,7 @@ struct msm_audio {
 	int mmap_flag;
 	atomic_t pending_buffer;
 	bool set_channel_map;
-	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL_V8];
+	char channel_map[8];
 	int cmd_interrupt;
 	bool meta_data_mode;
 	uint32_t volume;
@@ -125,12 +125,6 @@ struct output_meta_data_st {
 struct msm_plat_data {
 	int perf_mode;
 	struct snd_pcm *pcm;
-	struct msm_pcm_ch_map *ch_map[MSM_FRONTEND_DAI_MAX];
-};
-
-struct msm_pcm_ch_map {
-	bool set_ch_map;
-	char channel_map[PCM_FORMAT_MAX_NUM_CHANNEL];
 };
 
 #endif /*_MSM_PCM_H*/

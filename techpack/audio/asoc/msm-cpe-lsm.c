@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2019, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -21,7 +21,6 @@
 #include <linux/of.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/signal.h>
 #include <linux/freezer.h>
 #include <sound/soc.h>
 #include <sound/lsm_params.h>
@@ -479,18 +478,15 @@ static int msm_cpe_lab_buf_alloc(struct snd_pcm_substream *substream,
 	lab_d->pcm_buf = pcm_buf;
 	dma_alloc = bufsz * bufcnt;
 	pcm_buf->mem = NULL;
-	pcm_buf->mem = kzalloc(dma_alloc, GFP_DMA);
+	pcm_buf->mem = dma_alloc_coherent(dma_data->sdev->dev.parent,
+					  dma_alloc,
+					  &(pcm_buf->phys),
+					  GFP_KERNEL);
 	if (!pcm_buf->mem) {
+		dev_err(rtd->dev,
+			"%s:DMA alloc failed size = %x\n",
+			__func__, dma_alloc);
 		rc = -ENOMEM;
-		goto fail;
-	}
-
-	pcm_buf->phys = dma_map_single(dma_data->sdev->dev.parent,
-			pcm_buf->mem, dma_alloc, DMA_BIDIRECTIONAL);
-	if (dma_mapping_error(dma_data->sdev->dev.parent, pcm_buf->phys)) {
-		dev_err(rtd->dev, "%s Error mapping DMA buffers\n", __func__);
-		pcm_buf->phys = (phys_addr_t)NULL;
-		rc = -EFAULT;
 		goto fail;
 	}
 
@@ -508,10 +504,13 @@ static int msm_cpe_lab_buf_alloc(struct snd_pcm_substream *substream,
 
 	return 0;
 fail:
-	if (pcm_buf && pcm_buf->mem)
-		kfree(pcm_buf->mem);
-	kfree(pcm_buf);
-	lab_d->pcm_buf = NULL;
+	if (pcm_buf) {
+		if (pcm_buf->mem)
+			dma_free_coherent(dma_data->sdev->dev.parent, dma_alloc,
+					  pcm_buf->mem, pcm_buf->phys);
+		kfree(pcm_buf);
+		lab_d->pcm_buf = NULL;
+	}
 exit:
 	return rc;
 }
@@ -545,12 +544,8 @@ static int msm_cpe_lab_buf_dealloc(struct snd_pcm_substream *substream,
 	pcm_buf = lab_d->pcm_buf;
 	dma_alloc = bufsz * bufcnt;
 	if (dma_data && pcm_buf)
-		if (pcm_buf->phys)
-			dma_unmap_single(dma_data->sdev->dev.parent,
-				pcm_buf->phys, dma_alloc, DMA_BIDIRECTIONAL);
-	if (pcm_buf)
-		kfree(pcm_buf->mem);
-
+		dma_free_coherent(dma_data->sdev->dev.parent, dma_alloc,
+				  pcm_buf->mem, pcm_buf->phys);
 	kfree(pcm_buf);
 	lab_d->pcm_buf = NULL;
 	return rc;
@@ -638,7 +633,7 @@ static int msm_cpe_lab_thread(void *data)
 	memset(lab_d->pcm_buf[0].mem, 0, lab_d->pcm_size);
 
 	rc = slim_port_xfer(dma_data->sdev, dma_data->ph,
-			    lab_d->pcm_buf[0].mem,
+			    lab_d->pcm_buf[0].phys,
 			    hw_params->buf_sz, &lab_d->comp);
 	if (rc) {
 		dev_err(rtd->dev,
@@ -648,7 +643,7 @@ static int msm_cpe_lab_thread(void *data)
 	}
 
 	rc = slim_port_xfer(dma_data->sdev, dma_data->ph,
-			    lab_d->pcm_buf[1].mem,
+			    lab_d->pcm_buf[1].phys,
 			    hw_params->buf_sz, &lab_d->comp);
 	if (rc) {
 		dev_err(rtd->dev,
@@ -683,7 +678,7 @@ static int msm_cpe_lab_thread(void *data)
 	       lab_d->thread_status != MSM_LSM_LAB_THREAD_ERROR) {
 
 		rc = slim_port_xfer(dma_data->sdev, dma_data->ph,
-				    next_buf->mem,
+				    next_buf->phys,
 				    hw_params->buf_sz, &lab_d->comp);
 		if (rc) {
 			dev_err(rtd->dev,
@@ -3137,7 +3132,7 @@ static snd_pcm_uframes_t msm_cpe_lsm_pointer(
 }
 
 static int msm_cpe_lsm_copy(struct snd_pcm_substream *substream, int a,
-	 unsigned long hwoff, void __user *buf, unsigned long fbytes)
+	 snd_pcm_uframes_t hwoff, void __user *buf, snd_pcm_uframes_t frames)
 {
 	struct cpe_lsm_data *lsm_d = cpe_get_lsm_data(substream);
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
@@ -3145,8 +3140,10 @@ static int msm_cpe_lsm_copy(struct snd_pcm_substream *substream, int a,
 	struct cpe_lsm_session *session;
 	struct cpe_lsm_lab *lab_d = &lsm_d->lab;
 	char *pcm_buf;
+	int fbytes = 0;
 	int rc = 0;
 
+	fbytes = frames_to_bytes(runtime, frames);
 	if (runtime->status->state == SNDRV_PCM_STATE_XRUN ||
 	   runtime->status->state == SNDRV_PCM_STATE_PREPARED) {
 		pr_err("%s: XRUN ignore for now\n", __func__);
@@ -3289,7 +3286,7 @@ static const struct snd_pcm_ops msm_cpe_lsm_ops = {
 	.prepare = msm_cpe_lsm_prepare,
 	.trigger = msm_cpe_lsm_trigger,
 	.pointer = msm_cpe_lsm_pointer,
-	.copy_user = msm_cpe_lsm_copy,
+	.copy = msm_cpe_lsm_copy,
 	.hw_params = msm_cpe_lsm_hwparams,
 	.compat_ioctl = msm_cpe_lsm_ioctl_compat,
 };
@@ -3338,19 +3335,8 @@ static struct platform_driver msm_cpe_lsm_driver = {
 	.probe = msm_cpe_lsm_probe,
 	.remove = msm_cpe_lsm_remove,
 };
+module_platform_driver(msm_cpe_lsm_driver);
 
-int __init msm_cpe_lsm_init(void)
-{
-	return platform_driver_register(&msm_cpe_lsm_driver);
-}
-
-void __exit msm_cpe_lsm_exit(void)
-{
-	platform_driver_unregister(&msm_cpe_lsm_driver);
-}
-
-module_init(msm_cpe_lsm_init);
-module_exit(msm_cpe_lsm_exit);
 MODULE_DESCRIPTION("CPE LSM platform driver");
 MODULE_DEVICE_TABLE(of, msm_cpe_lsm_dt_match);
 MODULE_LICENSE("GPL v2");

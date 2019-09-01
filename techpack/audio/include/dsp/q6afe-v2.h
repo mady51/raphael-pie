@@ -1,5 +1,4 @@
-/* Copyright (c) 2012-2019, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019 XiaoMi, Inc.
+/* Copyright (c) 2012-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -25,10 +24,6 @@
 #define MSM_AFE_4CHANNELS   4
 #define MSM_AFE_6CHANNELS   6
 #define MSM_AFE_8CHANNELS   8
-#define MSM_AFE_10CHANNELS   10
-#define MSM_AFE_12CHANNELS   12
-#define MSM_AFE_14CHANNELS   14
-#define MSM_AFE_16CHANNELS   16
 
 #define MSM_AFE_I2S_FORMAT_LPCM		0
 #define MSM_AFE_I2S_FORMAT_COMPR		1
@@ -46,12 +41,7 @@
 
 #define AFE_CLK_VERSION_V1    1
 #define AFE_CLK_VERSION_V2    2
-
 #define AFE_API_VERSION_SUPPORT_SPV3	2
-#define AFE_API_VERSION_V3		3
-/* for VAD and Island mode */
-#define AFE_API_VERSION_V4		4
-
 typedef int (*routing_cb)(int port);
 
 enum {
@@ -112,7 +102,7 @@ enum {
 	/* IDX 45->49 */
 	IDX_SLIMBUS_6_RX,
 	IDX_SLIMBUS_6_TX,
-	IDX_PRIMARY_SPDIF_RX,
+	IDX_SPDIF_RX,
 	IDX_GLOBAL_CFG,
 	IDX_AUDIO_PORT_ID_I2S_RX,
 	/* IDX 50->53 */
@@ -234,40 +224,6 @@ enum {
 	IDX_AFE_PORT_ID_QUINARY_TDM_TX_6,
 	IDX_AFE_PORT_ID_QUINARY_TDM_RX_7,
 	IDX_AFE_PORT_ID_QUINARY_TDM_TX_7,
-	/* IDX 161 to 181 */
-	IDX_AFE_PORT_ID_WSA_CODEC_DMA_RX_0,
-	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_0,
-	IDX_AFE_PORT_ID_WSA_CODEC_DMA_RX_1,
-	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_1,
-	IDX_AFE_PORT_ID_WSA_CODEC_DMA_TX_2,
-	IDX_AFE_PORT_ID_VA_CODEC_DMA_TX_0,
-	IDX_AFE_PORT_ID_VA_CODEC_DMA_TX_1,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_0,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_0,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_1,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_1,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_2,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_2,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_3,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_3,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_4,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_4,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_5,
-	IDX_AFE_PORT_ID_TX_CODEC_DMA_TX_5,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_6,
-	IDX_AFE_PORT_ID_RX_CODEC_DMA_RX_7,
-	/* IDX 182 to 184 */
-	IDX_SECONDARY_SPDIF_RX,
-	IDX_PRIMARY_SPDIF_TX,
-	IDX_SECONDARY_SPDIF_TX,
-
-        IDX_AFE_PORT_ID_PSEUDOPORT_01,
-	/* IDX 185 to 186 */
-	IDX_SLIMBUS_9_RX,
-	IDX_SLIMBUS_9_TX,
-	/* IDX 187 -> 189 */
-	IDX_AFE_PORT_ID_SENARY_PCM_RX,
-	IDX_AFE_PORT_ID_SENARY_PCM_TX,
 	AFE_MAX_PORTS
 };
 
@@ -284,23 +240,14 @@ enum afe_cal_mode {
 	AFE_CAL_MODE_NONE,
 };
 
-enum afe_vad_cfg_type {
-	AFE_VAD_ENABLE = 0x00,
-	AFE_VAD_PREROLL,
-};
-
-struct vad_config {
-	u32 is_enable;
-	u32 pre_roll;
-};
-
 struct afe_audio_buffer {
 	dma_addr_t phys;
 	void       *data;
 	uint32_t   used;
 	uint32_t   size;/* size of buffer */
 	uint32_t   actual_size; /* actual number of bytes read by DSP */
-	struct     dma_buf *dma_buf;
+	struct      ion_handle *handle;
+	struct      ion_client *client;
 };
 
 struct afe_audio_port_data {
@@ -334,14 +281,12 @@ struct aanc_data {
 	uint16_t aanc_tx_port;
 	uint32_t aanc_rx_port_sample_rate;
 	uint32_t aanc_tx_port_sample_rate;
-	int level;
 };
 
 int afe_open(u16 port_id, union afe_port_config *afe_config, int rate);
 int afe_close(int port_id);
 int afe_loopback(u16 enable, u16 rx_port, u16 tx_port);
 int afe_sidetone_enable(u16 tx_port_id, u16 rx_port_id, bool enable);
-int afe_set_display_stream(u16 rx_port_id, u32 stream_idx, u32 ctl_idx);
 int afe_loopback_gain(u16 port_id, u16 volume);
 int afe_validate_port(u16 port_id);
 int afe_get_port_index(u16 port_id);
@@ -370,13 +315,8 @@ int afe_rt_proxy_port_write(phys_addr_t buf_addr_p,
 int afe_rt_proxy_port_read(phys_addr_t buf_addr_p,
 			u32 mem_map_handle, int bytes);
 void afe_set_cal_mode(u16 port_id, enum afe_cal_mode afe_cal_mode);
-void afe_set_vad_cfg(u32 vad_enable, u32 preroll_config,
-		     u32 port_id);
-void afe_set_island_mode_cfg(u16 port_id, u32 enable_flag);
-void afe_get_island_mode_cfg(u16 port_id, u32 *enable_flag);
 int afe_port_start(u16 port_id, union afe_port_config *afe_config,
 	u32 rate);
-int afe_set_tws_channel_mode(u16 port_id, u32 channel_mode);
 int afe_port_start_v2(u16 port_id, union afe_port_config *afe_config,
 		      u32 rate, u16 afe_in_channels, u16 afe_in_bit_width,
 		      struct afe_enc_config *enc_config,
@@ -422,11 +362,6 @@ int afe_send_spdif_ch_status_cfg(struct afe_param_id_spdif_ch_status_cfg
 int afe_spdif_port_start(u16 port_id, struct afe_spdif_port_config *spdif_port,
 		u32 rate);
 
-int afe_spdif_reg_event_cfg(u16 port_id, u16 reg_flag,
-		void (*cb)(uint32_t opcode,
-		uint32_t token, uint32_t *payload, void *priv),
-		void *private_data);
-
 int afe_turn_onoff_hw_mad(u16 mad_type, u16 mad_enable);
 int afe_port_set_mad_type(u16 port_id, enum afe_mad_type mad_type);
 enum afe_mad_type afe_port_get_mad_type(u16 port_id);
@@ -436,7 +371,6 @@ void afe_clear_config(enum afe_config_type config);
 bool afe_has_config(enum afe_config_type config);
 
 void afe_set_aanc_info(struct aanc_data *aanc_info);
-int afe_set_aanc_noise_level(int val);
 int afe_port_group_set_param(u16 group_id,
 	union afe_port_group_config *afe_group_config);
 int afe_port_group_enable(u16 group_id,
@@ -454,53 +388,4 @@ int afe_tdm_port_start(u16 port_id, struct afe_tdm_port_config *tdm_port,
 void afe_set_routing_callback(routing_cb cb);
 int afe_get_av_dev_drift(struct afe_param_id_dev_timing_stats *timing_stats,
 		u16 port);
-int afe_cal_init_hwdep(void *card);
-int afe_send_port_island_mode(u16 port_id);
-
-#ifdef CONFIG_MSM_CSPL
-int afe_apr_send_pkt_crus(void *data, int index, int set);
-int crus_afe_port_close(u16 port_id);
-int crus_afe_port_start(u16 port_id);
-#endif
-
-int afe_send_cmd_wakeup_register(void *handle, bool enable);
-void afe_register_wakeup_irq_callback(
-	void (*afe_cb_wakeup_irq)(void *handle));
-
-#define AFE_LPASS_CORE_HW_BLOCK_ID_NONE                        0
-#define AFE_LPASS_CORE_HW_BLOCK_ID_AVTIMER                     2
-#define AFE_LPASS_CORE_HW_MACRO_BLOCK                          3
-
-/* Handles audio-video timer (avtimer) and BTSC vote requests from clients */
-#define AFE_CMD_REMOTE_LPASS_CORE_HW_VOTE_REQUEST            0x000100f4
-
-struct afe_cmd_remote_lpass_core_hw_vote_request {
-	struct apr_hdr hdr;
-	uint32_t  hw_block_id;
-	/* ID of the hardware block. */
-	char client_name[8];
-	/* Name of the client. */
-} __packed;
-
-#define AFE_CMD_RSP_REMOTE_LPASS_CORE_HW_VOTE_REQUEST        0x000100f5
-
-struct afe_cmd_rsp_remote_lpass_core_hw_vote_request {
-	uint32_t client_handle;
-	/**< Handle of the client. */
-} __packed;
-
-#define AFE_CMD_REMOTE_LPASS_CORE_HW_DEVOTE_REQUEST            0x000100f6
-
-struct afe_cmd_remote_lpass_core_hw_devote_request {
-	struct apr_hdr hdr;
-	uint32_t  hw_block_id;
-	/**< ID of the hardware block.*/
-
-	uint32_t client_handle;
-	/**< Handle of the client.*/
-} __packed;
-
-int afe_vote_lpass_core_hw(uint32_t hw_block_id, char *client_name,
-			uint32_t *client_handle);
-int afe_unvote_lpass_core_hw(uint32_t hw_block_id, uint32_t client_handle);
 #endif /* __Q6AFE_V2_H__ */

@@ -71,13 +71,11 @@ struct swr_port {
 	u8 ch_mask;
 	u32 ch_rate;
 	u8 num_ch;
-	u8 port_type;
 };
 
 enum {
 	WSA881X_DEV_DOWN,
 	WSA881X_DEV_UP,
-	WSA881X_DEV_READY,
 };
 
 /*
@@ -101,7 +99,6 @@ struct wsa881x_priv {
 	int version;
 	struct mutex bg_lock;
 	struct mutex res_lock;
-	struct mutex temp_lock;
 	struct snd_info_entry *entry;
 	struct snd_info_entry *version_entry;
 	int state;
@@ -494,17 +491,6 @@ static const struct file_operations codec_debug_ops = {
 	.read = codec_debug_read,
 };
 
-static void wsa881x_regcache_sync(struct wsa881x_priv *wsa881x)
-{
-	mutex_lock(&wsa881x->res_lock);
-	if (wsa881x->state != WSA881X_DEV_READY) {
-		regcache_mark_dirty(wsa881x->regmap);
-		regcache_sync(wsa881x->regmap);
-		wsa881x->state = WSA881X_DEV_READY;
-	}
-	mutex_unlock(&wsa881x->res_lock);
-}
-
 static const struct reg_sequence wsa881x_pre_pmu_pa[] = {
 	{WSA881X_SPKR_DRV_GAIN, 0x41, 0},
 	{WSA881X_SPKR_MISC_CTL1, 0x01, 0},
@@ -767,8 +753,7 @@ static const struct snd_kcontrol_new swr_dac_port[] = {
 };
 
 static int wsa881x_set_port(struct snd_soc_codec *codec, int port_idx,
-			u8 *port_id, u8 *num_ch, u8 *ch_mask, u32 *ch_rate,
-			u8 *port_type)
+			u8 *port_id, u8 *num_ch, u8 *ch_mask, u32 *ch_rate)
 {
 	struct wsa881x_priv *wsa881x = snd_soc_codec_get_drvdata(codec);
 
@@ -776,7 +761,6 @@ static int wsa881x_set_port(struct snd_soc_codec *codec, int port_idx,
 	*num_ch = wsa881x->port[port_idx].num_ch;
 	*ch_mask = wsa881x->port[port_idx].ch_mask;
 	*ch_rate = wsa881x->port[port_idx].ch_rate;
-	*port_type = wsa881x->port[port_idx].port_type;
 	return 0;
 }
 
@@ -789,7 +773,6 @@ static int wsa881x_enable_swr_dac_port(struct snd_soc_dapm_widget *w,
 	u8 num_ch[WSA881X_MAX_SWR_PORTS];
 	u8 ch_mask[WSA881X_MAX_SWR_PORTS];
 	u32 ch_rate[WSA881X_MAX_SWR_PORTS];
-	u8 port_type[WSA881X_MAX_SWR_PORTS];
 	u8 num_port = 0;
 
 	dev_dbg(codec->dev, "%s: event %d name %s\n", __func__,
@@ -801,69 +784,53 @@ static int wsa881x_enable_swr_dac_port(struct snd_soc_dapm_widget *w,
 	case SND_SOC_DAPM_PRE_PMU:
 		wsa881x_set_port(codec, SWR_DAC_PORT,
 				&port_id[num_port], &num_ch[num_port],
-				&ch_mask[num_port], &ch_rate[num_port],
-				&port_type[num_port]);
+				&ch_mask[num_port], &ch_rate[num_port]);
 		++num_port;
 
 		if (wsa881x->comp_enable) {
 			wsa881x_set_port(codec, SWR_COMP_PORT,
 					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+					&ch_mask[num_port], &ch_rate[num_port]);
 			++num_port;
 		}
 		if (wsa881x->boost_enable) {
 			wsa881x_set_port(codec, SWR_BOOST_PORT,
 					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+					&ch_mask[num_port], &ch_rate[num_port]);
 			++num_port;
 		}
 		if (wsa881x->visense_enable) {
 			wsa881x_set_port(codec, SWR_VISENSE_PORT,
 					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+					&ch_mask[num_port], &ch_rate[num_port]);
 			++num_port;
 		}
 		swr_connect_port(wsa881x->swr_slave, &port_id[0], num_port,
-				&ch_mask[0], &ch_rate[0], &num_ch[0],
-					&port_type[0]);
+				&ch_mask[0], &ch_rate[0], &num_ch[0]);
 		break;
 	case SND_SOC_DAPM_POST_PMU:
 		break;
 	case SND_SOC_DAPM_PRE_PMD:
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		wsa881x_set_port(codec, SWR_DAC_PORT,
-				&port_id[num_port], &num_ch[num_port],
-				&ch_mask[num_port], &ch_rate[num_port],
-				&port_type[num_port]);
+		port_id[num_port] = wsa881x->port[SWR_DAC_PORT].port_id;
 		++num_port;
-
 		if (wsa881x->comp_enable) {
-			wsa881x_set_port(codec, SWR_COMP_PORT,
-					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+			port_id[num_port] =
+				wsa881x->port[SWR_COMP_PORT].port_id;
 			++num_port;
 		}
 		if (wsa881x->boost_enable) {
-			wsa881x_set_port(codec, SWR_BOOST_PORT,
-					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+			port_id[num_port] =
+				wsa881x->port[SWR_BOOST_PORT].port_id;
 			++num_port;
 		}
 		if (wsa881x->visense_enable) {
-			wsa881x_set_port(codec, SWR_VISENSE_PORT,
-					&port_id[num_port], &num_ch[num_port],
-					&ch_mask[num_port], &ch_rate[num_port],
-					&port_type[num_port]);
+			port_id[num_port] =
+				wsa881x->port[SWR_VISENSE_PORT].port_id;
 			++num_port;
 		}
-		swr_disconnect_port(wsa881x->swr_slave, &port_id[0], num_port,
-				&ch_mask[0], &port_type[0]);
+		swr_disconnect_port(wsa881x->swr_slave, &port_id[0], num_port);
 		break;
 	default:
 		break;
@@ -883,9 +850,7 @@ static int wsa881x_rdac_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		mutex_lock(&wsa881x->temp_lock);
 		wsa881x_resource_acquire(codec, ENABLE);
-		mutex_unlock(&wsa881x->temp_lock);
 		wsa881x_boost_ctrl(codec, ENABLE);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
@@ -893,9 +858,7 @@ static int wsa881x_rdac_event(struct snd_soc_dapm_widget *w,
 					    wsa881x->swr_slave->dev_num,
 					    false);
 		wsa881x_boost_ctrl(codec, DISABLE);
-		mutex_lock(&wsa881x->temp_lock);
 		wsa881x_resource_acquire(codec, DISABLE);
-		mutex_unlock(&wsa881x->temp_lock);
 		break;
 	}
 	return 0;
@@ -937,7 +900,7 @@ static void wsa881x_ocp_ctl_work(struct work_struct *work)
 	else
 		snd_soc_update_bits(codec, WSA881X_SPKR_OCP_CTL, 0xC0, 0xC0);
 
-	schedule_delayed_work(&wsa881x->ocp_ctl_work,
+	queue_delayed_work(system_power_efficient_wq, &wsa881x->ocp_ctl_work,
 			msecs_to_jiffies(wsa881x_ocp_poll_timer_sec * 1000));
 }
 
@@ -992,7 +955,7 @@ static int wsa881x_spkr_pa_event(struct snd_soc_dapm_widget *w,
 					    0x07, 0x01);
 			wsa881x_visense_adc_ctrl(codec, ENABLE);
 		}
-		schedule_delayed_work(&wsa881x->ocp_ctl_work,
+		queue_delayed_work(system_power_efficient_wq, &wsa881x->ocp_ctl_work,
 			msecs_to_jiffies(WSA881X_OCP_CTL_TIMER_SEC * 1000));
 		/* Force remove group */
 		swr_remove_from_group(wsa881x->swr_slave,
@@ -1038,8 +1001,7 @@ static const struct snd_soc_dapm_route wsa881x_audio_map[] = {
 };
 
 int wsa881x_set_channel_map(struct snd_soc_codec *codec, u8 *port, u8 num_port,
-				unsigned int *ch_mask, unsigned int *ch_rate,
-					u8 *port_type)
+				unsigned int *ch_mask, unsigned int *ch_rate)
 {
 	struct wsa881x_priv *wsa881x = snd_soc_codec_get_drvdata(codec);
 	int i;
@@ -1056,8 +1018,6 @@ int wsa881x_set_channel_map(struct snd_soc_codec *codec, u8 *port, u8 num_port,
 		wsa881x->port[i].ch_mask = ch_mask[i];
 		wsa881x->port[i].ch_rate = ch_rate[i];
 		wsa881x->port[i].num_ch = __sw_hweight8(ch_mask[i]);
-		if (port_type)
-			wsa881x->port[i].port_type = port_type[i];
 	}
 	return 0;
 }
@@ -1143,8 +1103,13 @@ static int32_t wsa881x_temp_reg_read(struct snd_soc_codec *codec,
 			return -EINVAL;
 		}
 	}
-	wsa881x_regcache_sync(wsa881x);
-	mutex_lock(&wsa881x->temp_lock);
+	mutex_lock(&wsa881x->res_lock);
+	if (!wsa881x->clk_cnt) {
+		regcache_mark_dirty(wsa881x->regmap);
+		regcache_sync(wsa881x->regmap);
+	}
+	mutex_unlock(&wsa881x->res_lock);
+
 	wsa881x_resource_acquire(codec, ENABLE);
 
 	snd_soc_update_bits(codec, WSA881X_TADC_VALUE_CTL, 0x01, 0x00);
@@ -1157,7 +1122,6 @@ static int32_t wsa881x_temp_reg_read(struct snd_soc_codec *codec,
 	wsa_temp_reg->d2_lsb = snd_soc_read(codec, WSA881X_OTP_REG_4);
 
 	wsa881x_resource_acquire(codec, DISABLE);
-	mutex_unlock(&wsa881x->temp_lock);
 
 	return 0;
 }
@@ -1173,6 +1137,7 @@ static int wsa881x_probe(struct snd_soc_codec *codec)
 	dev = wsa881x->swr_slave;
 	wsa881x->codec = codec;
 	mutex_init(&wsa881x->bg_lock);
+	mutex_init(&wsa881x->res_lock);
 	wsa881x_init(codec);
 	snprintf(wsa881x->tz_pdata.name, sizeof(wsa881x->tz_pdata.name),
 		"%s.%x", "wsatz", (u8)dev->addr);
@@ -1194,6 +1159,7 @@ static int wsa881x_remove(struct snd_soc_codec *codec)
 	if (wsa881x->tz_pdata.tz_dev)
 		wsa881x_deinit_thermal(wsa881x->tz_pdata.tz_dev);
 	mutex_destroy(&wsa881x->bg_lock);
+	mutex_destroy(&wsa881x->res_lock);
 
 	return 0;
 }
@@ -1376,8 +1342,6 @@ static int wsa881x_swr_probe(struct swr_device *pdev)
 			__func__);
 		goto dev_err;
 	}
-	mutex_init(&wsa881x->res_lock);
-	mutex_init(&wsa881x->temp_lock);
 
 	return 0;
 
@@ -1400,8 +1364,6 @@ static int wsa881x_swr_remove(struct swr_device *pdev)
 	}
 	debugfs_remove_recursive(debugfs_wsa881x_dent);
 	debugfs_wsa881x_dent = NULL;
-	mutex_destroy(&wsa881x->res_lock);
-	mutex_destroy(&wsa881x->temp_lock);
 	snd_soc_unregister_codec(&pdev->dev);
 	if (wsa881x->pd_gpio)
 		gpio_free(wsa881x->pd_gpio);
@@ -1460,11 +1422,6 @@ static int wsa881x_swr_reset(struct swr_device *pdev)
 		dev_err(&pdev->dev, "%s: wsa881x is NULL\n", __func__);
 		return -EINVAL;
 	}
-	if (wsa881x->state == WSA881X_DEV_READY) {
-		dev_dbg(&pdev->dev, "%s: device already active\n", __func__);
-		return 0;
-	}
-
 	wsa881x->bg_cnt = 0;
 	wsa881x->clk_cnt = 0;
 	while (swr_get_logical_dev_num(pdev, pdev->addr, &devnum) && retry--) {
@@ -1472,8 +1429,8 @@ static int wsa881x_swr_reset(struct swr_device *pdev)
 		usleep_range(1000, 1100);
 	}
 	pdev->dev_num = devnum;
-	wsa881x_regcache_sync(wsa881x);
-
+	regcache_mark_dirty(wsa881x->regmap);
+	regcache_sync(wsa881x->regmap);
 	return 0;
 }
 

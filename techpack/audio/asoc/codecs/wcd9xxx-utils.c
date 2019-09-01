@@ -1,4 +1,4 @@
-/* Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -37,16 +37,6 @@
 #define PAGE_REG_ADDR 0x00
 
 static enum wcd9xxx_intf_status wcd9xxx_intf = -1;
-
-static struct mfd_cell pahu_devs[] = {
-	{
-		.name = "qcom-wcd-pinctrl",
-		.of_compatible = "qcom,wcd-pinctrl",
-	},
-	{
-		.name = "pahu_codec",
-	},
-};
 
 static struct mfd_cell tavil_devs[] = {
 	{
@@ -365,19 +355,6 @@ struct wcd9xxx_pdata *wcd9xxx_populate_dt_data(struct device *dev)
 		}
 	}
 
-	pdata->has_micb_supply_en_gpio = of_property_read_bool(dev->of_node,
-					   "qcom,has-micbias-supply-en-gpio");
-	if (pdata->has_micb_supply_en_gpio) {
-		pdata->micb_en_ctl = of_parse_phandle(dev->of_node,
-				"qcom,micbias-supply-en-gpio-node", 0);
-		if (!pdata->micb_en_ctl) {
-			dev_err(dev, "%s No entry for %s property in node %s\n",
-				__func__, "qcom,micbias-supply-en-gpio-node",
-				dev->of_node->full_name);
-			goto err_parse_dt_prop;
-		}
-	}
-
 	if (!(wcd9xxx_read_of_property_u32(dev, "qcom,cdc-mclk-clk-rate",
 					   &prop_val)))
 		pdata->mclk_rate = prop_val;
@@ -490,8 +467,7 @@ int wcd9xxx_page_write(struct wcd9xxx *wcd9xxx, unsigned short *reg)
 	unsigned short c_reg, reg_addr;
 	u8 pg_num, prev_pg_num;
 
-	if (wcd9xxx->type != WCD9335 && wcd9xxx->type != WCD934X &&
-		wcd9xxx->type != WCD9360)
+	if (wcd9xxx->type != WCD9335 && wcd9xxx->type != WCD934X)
 		return ret;
 
 	c_reg = *reg;
@@ -888,10 +864,6 @@ int wcd9xxx_get_codec_info(struct device *dev)
 	}
 
 	switch (wcd9xxx->type) {
-	case WCD9360:
-		cinfo->dev = pahu_devs;
-		cinfo->size = ARRAY_SIZE(pahu_devs);
-		break;
 	case WCD934X:
 		cinfo->dev = tavil_devs;
 		cinfo->size = ARRAY_SIZE(tavil_devs);
@@ -995,7 +967,7 @@ int wcd9xxx_core_res_init(
 	wcd9xxx_core_res->num_irq_regs = num_irq_regs;
 	wcd9xxx_core_res->wcd_core_regmap = wcd_regmap;
 
-	pr_debug("%s: num_irqs = %d, num_irq_regs = %d\n",
+	pr_info("%s: num_irqs = %d, num_irq_regs = %d\n",
 			__func__, wcd9xxx_core_res->num_irqs,
 			wcd9xxx_core_res->num_irq_regs);
 

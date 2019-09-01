@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -151,7 +151,7 @@ static long audio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	default: {
 		rc = audio->codec_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("Failed in utils_ioctl: %d\n", rc);
+			pr_err("Failed in utils_ioctl: %d\n", rc);
 		break;
 	}
 	}
@@ -253,7 +253,7 @@ static long audio_compat_ioctl(struct file *file, unsigned int cmd,
 	default: {
 		rc = audio->codec_compat_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("Failed in utils_ioctl: %d\n", rc);
+			pr_err("Failed in utils_ioctl: %d\n", rc);
 		break;
 	}
 	}
@@ -420,7 +420,7 @@ static struct miscdevice audio_alac_misc = {
 	.fops = &audio_alac_fops,
 };
 
-int __init audio_alac_init(void)
+static int __init audio_alac_init(void)
 {
 	int ret = misc_register(&audio_alac_misc);
 
@@ -432,8 +432,4 @@ int __init audio_alac_init(void)
 	return ret;
 }
 
-void audio_alac_exit(void)
-{
-	mutex_destroy(&audio_alac_ws_mgr.ws_lock);
-	misc_deregister(&audio_alac_misc);
-}
+device_initcall(audio_alac_init);

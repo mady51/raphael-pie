@@ -1,5 +1,4 @@
 /* Copyright (c) 2016 Cirrus Logic, Inc.
- * Copyright (C) 2019 XiaoMi, Inc.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -15,7 +14,6 @@
 
 #include <linux/types.h>
 #include <linux/ioctl.h>
-
 
 #define CIRRUS_SP			0x10027053
 #define CIRRUS_SP_ENABLE		0x10002001
@@ -79,13 +77,6 @@
  * initiate l/r channel swap transition
  */
 #define CRUS_PARAM_RX_CHANNEL_SWAP	0x00A1AF12
-#define CRUS_PARAM_RX_GET_CHANNEL_SWAP	0x00A1AF13
-/*
- * CRUS_PARAM_RX_SET_ATTENUATION
- * set volume attenuation in volume control blocks 1 & 2
- */
-#define CRUS_PARAM_RX_SET_ATTENUATION	0x00A1AF0A
-#define CRUS_AFE_PARAM_ID_ENABLE	0x00010203
 
 #define SPK_PROT_IOCTL_MAGIC		'a'
 
@@ -93,8 +84,6 @@
 #define CRUS_SP_IOCTL_SET	_IOWR(SPK_PROT_IOCTL_MAGIC, 220, void *)
 #define CRUS_SP_IOCTL_GET_CALIB	_IOWR(SPK_PROT_IOCTL_MAGIC, 221, void *)
 #define CRUS_SP_IOCTL_SET_CALIB	_IOWR(SPK_PROT_IOCTL_MAGIC, 222, void *)
-#define CRUS_SP_IOCTL_READ_CALIB_FROM_SLOT	_IOWR(SPK_PROT_IOCTL_MAGIC, 223, void *)
-#define CRUS_SP_IOCTL_WRITE_CALIB_TO_SLOT	_IOWR(SPK_PROT_IOCTL_MAGIC, 224, void *)
 
 #define CRUS_SP_IOCTL_GET32		_IOWR(SPK_PROT_IOCTL_MAGIC, 219, \
 	compat_uptr_t)
@@ -103,10 +92,6 @@
 #define CRUS_SP_IOCTL_GET_CALIB32	_IOWR(SPK_PROT_IOCTL_MAGIC, 221, \
 	compat_uptr_t)
 #define CRUS_SP_IOCTL_SET_CALIB32	_IOWR(SPK_PROT_IOCTL_MAGIC, 222, \
-	compat_uptr_t)
-#define CRUS_SP_IOCTL_READ_CALIB_FROM_SLOT32 _IOWR(SPK_PROT_IOCTL_MAGIC, 223, \
-	compat_uptr_t)
-#define CRUS_SP_IOCTL_WRITE_CALIB_TO_SLOT32 _IOWR(SPK_PROT_IOCTL_MAGIC, 224, \
 	compat_uptr_t)
 
 struct crus_sp_ioctl_header {

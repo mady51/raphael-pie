@@ -1,4 +1,4 @@
-/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2015-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -137,7 +137,7 @@ static long audio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		pr_debug("%s[%pK]: Calling utils ioctl\n", __func__, audio);
 		rc = audio->codec_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("Failed in utils_ioctl: %d\n", rc);
+			pr_err("Failed in utils_ioctl: %d\n", rc);
 		break;
 	}
 	}
@@ -235,7 +235,7 @@ static long audio_compat_ioctl(struct file *file, unsigned int cmd,
 		pr_debug("%s[%pK]: Calling utils ioctl\n", __func__, audio);
 		rc = audio->codec_compat_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("Failed in utils_ioctl: %d\n", rc);
+			pr_err("Failed in utils_ioctl: %d\n", rc);
 		break;
 	}
 	}
@@ -344,7 +344,7 @@ static struct miscdevice audio_ape_misc = {
 	.fops = &audio_ape_fops,
 };
 
-int __init audio_ape_init(void)
+static int __init audio_ape_init(void)
 {
 	int ret = misc_register(&audio_ape_misc);
 
@@ -356,8 +356,4 @@ int __init audio_ape_init(void)
 	return ret;
 }
 
-void audio_ape_exit(void)
-{
-	mutex_destroy(&audio_ape_ws_mgr.ws_lock);
-	misc_deregister(&audio_ape_misc);
-}
+device_initcall(audio_ape_init);

@@ -23,8 +23,6 @@
 
 #define SWR_MSTR_PORT_LEN	8 /* Number of master ports */
 
-#define SWR_MAX_SLAVE_DEVICES 11
-
 #define SWRM_VERSION_1_0 0x01010000
 #define SWRM_VERSION_1_2 0x01030000
 #define SWRM_VERSION_1_3 0x01040000
@@ -97,7 +95,6 @@ struct swr_mstr_ctrl {
 			void *data), void *swr_handle, int type);
 	int irq;
 	int version;
-	u32 num_dev;
 	int num_enum_slaves;
 	int slave_status;
 	struct swr_mstr_port *mstr_port;
@@ -108,9 +105,6 @@ struct swr_mstr_ctrl {
 	u8 num_cfg_devs;
 	struct mutex force_down_lock;
 	int force_down_state;
-
-	struct notifier_block event_notifier;
-	struct work_struct dc_presence_work;
 };
 
 #endif /* _SWR_WCD_CTRL_H */

@@ -63,14 +63,6 @@ static struct notifier_block audio_pdr_locator_nb = {
 	.priority = 0,
 };
 
-/**
- * audio_pdr_register -
- *        register to PDR framework
- *
- * @nb: notifier block
- *
- * Returns 0 on success or error on failure
- */
 int audio_pdr_register(struct notifier_block *nb)
 {
 	if (nb == NULL) {
@@ -80,24 +72,6 @@ int audio_pdr_register(struct notifier_block *nb)
 	return srcu_notifier_chain_register(&audio_pdr_cb_list, nb);
 }
 EXPORT_SYMBOL(audio_pdr_register);
-
-/**
- * audio_pdr_deregister -
- *        Deregister from PDR framework
- *
- * @nb: notifier block
- *
- * Returns 0 on success or error on failure
- */
-int audio_pdr_deregister(struct notifier_block *nb)
-{
-	if (nb == NULL) {
-		pr_err("%s: Notifier block is NULL\n", __func__);
-		return -EINVAL;
-	}
-	return srcu_notifier_chain_unregister(&audio_pdr_cb_list, nb);
-}
-EXPORT_SYMBOL(audio_pdr_deregister);
 
 void *audio_pdr_service_register(int domain_id,
 				 struct notifier_block *nb, int *curr_state)
@@ -151,12 +125,11 @@ static int __init audio_pdr_subsys_init(void)
 	srcu_init_notifier_head(&audio_pdr_cb_list);
 	return 0;
 }
+subsys_initcall(audio_pdr_subsys_init);
 
 static int __init audio_pdr_late_init(void)
 {
 	int ret;
-
-	audio_pdr_subsys_init();
 
 	ret = get_service_location(
 		audio_pdr_services[AUDIO_PDR_DOMAIN_ADSP].client_name,
@@ -171,12 +144,4 @@ static int __init audio_pdr_late_init(void)
 
 	return ret;
 }
-module_init(audio_pdr_late_init);
-
-static void __exit audio_pdr_late_exit(void)
-{
-}
-module_exit(audio_pdr_late_exit);
-
-MODULE_DESCRIPTION("PDR framework driver");
-MODULE_LICENSE("GPL v2");
+late_initcall(audio_pdr_late_init);

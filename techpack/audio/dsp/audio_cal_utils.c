@@ -63,7 +63,6 @@ size_t get_cal_info_size(int32_t cal_type)
 		break;
 	case ADM_AUDPROC_CAL_TYPE:
 	case ADM_LSM_AUDPROC_CAL_TYPE:
-	case ADM_LSM_AUDPROC_PERSISTENT_CAL_TYPE:
 		size = sizeof(struct audio_cal_info_audproc);
 		break;
 	case ADM_AUDVOL_CAL_TYPE:
@@ -214,7 +213,6 @@ size_t get_user_cal_type_size(int32_t cal_type)
 		break;
 	case ADM_AUDPROC_CAL_TYPE:
 	case ADM_LSM_AUDPROC_CAL_TYPE:
-	case ADM_LSM_AUDPROC_PERSISTENT_CAL_TYPE:
 		size = sizeof(struct audio_cal_type_audproc);
 		break;
 	case ADM_AUDVOL_CAL_TYPE:
@@ -444,9 +442,11 @@ static void delete_cal_block(struct cal_block_data *cal_block)
 	cal_block->client_info = NULL;
 	kfree(cal_block->cal_info);
 	cal_block->cal_info = NULL;
-	if (cal_block->map_data.dma_buf  != NULL) {
-		msm_audio_ion_free(cal_block->map_data.dma_buf);
-		cal_block->map_data.dma_buf = NULL;
+	if (cal_block->map_data.ion_client  != NULL) {
+		msm_audio_ion_free(cal_block->map_data.ion_client,
+			cal_block->map_data.ion_handle);
+		cal_block->map_data.ion_client = NULL;
+		cal_block->map_data.ion_handle = NULL;
 	}
 	kfree(cal_block);
 done:
@@ -489,14 +489,6 @@ done:
 	return;
 }
 
-/**
- * cal_utils_destroy_cal_types -
- *        Destroys cal types and deregister from cal info
- *
- * @num_cal_types: number of cal types
- * @cal_type: cal type pointer with cal info
- *
- */
 void cal_utils_destroy_cal_types(int num_cal_types,
 			struct cal_type_data **cal_type)
 {
@@ -522,7 +514,6 @@ void cal_utils_destroy_cal_types(int num_cal_types,
 done:
 	return;
 }
-EXPORT_SYMBOL(cal_utils_destroy_cal_types);
 
 /**
  * cal_utils_get_only_cal_block
@@ -604,7 +595,9 @@ static int cal_block_ion_alloc(struct cal_block_data *cal_block)
 		goto done;
 	}
 
-	ret = msm_audio_ion_import(&cal_block->map_data.dma_buf,
+	ret = msm_audio_ion_import("audio_cal_client",
+		&cal_block->map_data.ion_client,
+		&cal_block->map_data.ion_handle,
 		cal_block->map_data.ion_map_handle,
 		NULL, 0,
 		&cal_block->cal_data.paddr,
@@ -734,8 +727,10 @@ static int realloc_memory(struct cal_block_data *cal_block)
 {
 	int ret = 0;
 
-	msm_audio_ion_free(cal_block->map_data.dma_buf);
-	cal_block->map_data.dma_buf = NULL;
+	msm_audio_ion_free(cal_block->map_data.ion_client,
+		cal_block->map_data.ion_handle);
+	cal_block->map_data.ion_client = NULL;
+	cal_block->map_data.ion_handle = NULL;
 	cal_block->cal_data.size = 0;
 
 	ret = cal_block_ion_alloc(cal_block);

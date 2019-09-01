@@ -2,7 +2,7 @@
  *
  * Copyright (C) 2008 Google, Inc.
  * Copyright (C) 2008 HTC Corporation
- * Copyright (c) 2010-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2010-2017, The Linux Foundation. All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -230,7 +230,7 @@ static long audio_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		pr_debug("%s[%pK]: Calling utils ioctl\n", __func__, audio);
 		rc = audio->codec_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("%s[%pK]:Failed in utils_ioctl: %d\n",
+			pr_err("%s[%pK]:Failed in utils_ioctl: %d\n",
 				__func__, audio, rc);
 	}
 	}
@@ -339,7 +339,7 @@ static long audio_compat_ioctl(struct file *file, unsigned int cmd,
 		pr_debug("%s[%pK]: Calling utils ioctl\n", __func__, audio);
 		rc = audio->codec_compat_ioctl(file, cmd, arg);
 		if (rc)
-			pr_err_ratelimited("%s[%pK]:Failed in utils_ioctl: %d\n",
+			pr_err("%s[%pK]:Failed in utils_ioctl: %d\n",
 				__func__, audio, rc);
 	}
 	}
@@ -461,7 +461,7 @@ static struct miscdevice audio_aac_misc = {
 	.fops = &audio_aac_fops,
 };
 
-int __init audio_aac_init(void)
+static int __init audio_aac_init(void)
 {
 	int ret = misc_register(&audio_aac_misc);
 
@@ -473,8 +473,4 @@ int __init audio_aac_init(void)
 	return ret;
 }
 
-void audio_aac_exit(void)
-{
-	mutex_destroy(&audio_aac_ws_mgr.ws_lock);
-	misc_deregister(&audio_aac_misc);
-}
+device_initcall(audio_aac_init);

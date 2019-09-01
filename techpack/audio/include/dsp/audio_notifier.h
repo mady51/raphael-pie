@@ -1,4 +1,4 @@
-/* Copyright (c) 2016, 2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -43,7 +43,7 @@ struct audio_notifier_cb_data {
 	int domain;
 };
 
-#if IS_ENABLED(CONFIG_MSM_QDSP6_NOTIFIER)
+#ifdef CONFIG_MSM_QDSP6_NOTIFIER
 
 /*
  * Use audio_notifier_register to register any audio
@@ -92,7 +92,7 @@ int audio_notifier_deregister(char *client_name);
 static inline int audio_notifier_register(char *client_name, int domain,
 					  struct notifier_block *nb)
 {
-	return 0;
+	return -ENODEV;
 }
 
 static inline int audio_notifier_deregister(char *client_name)
@@ -100,6 +100,6 @@ static inline int audio_notifier_deregister(char *client_name)
 	return 0;
 }
 
-#endif /* CONFIG_MSM_QDSP6_NOTIFIER */
+#endif /* CONFIG_MSM_QDSP6_PDR */
 
 #endif

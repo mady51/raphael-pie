@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2014, 2017-2018, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2012-2014, 2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -26,14 +26,9 @@
 
 #define Q6_PIL_GET_DELAY_MS 100
 #define BOOT_CMD 1
-#define SSR_RESET_CMD 1
 #define IMAGE_UNLOAD_CMD 0
 
 static ssize_t adsp_boot_store(struct kobject *kobj,
-	struct kobj_attribute *attr,
-	const char *buf, size_t count);
-
-static ssize_t adsp_ssr_store(struct kobject *kobj,
 	struct kobj_attribute *attr,
 	const char *buf, size_t count);
 
@@ -46,12 +41,8 @@ struct adsp_loader_private {
 static struct kobj_attribute adsp_boot_attribute =
 	__ATTR(boot, 0220, NULL, adsp_boot_store);
 
-static struct kobj_attribute adsp_ssr_attribute =
-	__ATTR(ssr, 0220, NULL, adsp_ssr_store);
-
 static struct attribute *attrs[] = {
 	&adsp_boot_attribute.attr,
-	&adsp_ssr_attribute.attr,
 	NULL,
 };
 
@@ -143,6 +134,9 @@ load_adsp:
 					__func__);
 				goto fail;
 			}
+
+			/* Set the state of the ADSP in APR driver */
+			apr_set_q6_state(APR_SUBSYS_LOADED);
 		} else if (adsp_state == APR_SUBSYS_LOADED) {
 			dev_dbg(&pdev->dev,
 			"%s: ADSP state = %x\n", __func__, adsp_state);
@@ -158,46 +152,6 @@ fail:
 static void adsp_loader_do(struct platform_device *pdev)
 {
 	schedule_work(&adsp_ldr_work);
-}
-
-static ssize_t adsp_ssr_store(struct kobject *kobj,
-	struct kobj_attribute *attr,
-	const char *buf,
-	size_t count)
-{
-	int ssr_command = 0;
-	struct subsys_device *adsp_dev = NULL;
-	struct platform_device *pdev = adsp_private;
-	struct adsp_loader_private *priv = NULL;
-	int rc;
-
-	dev_dbg(&pdev->dev, "%s: going to call adsp ssr\n ", __func__);
-
-	if (kstrtoint(buf, 10, &ssr_command) < 0)
-		return -EINVAL;
-
-	if (ssr_command != SSR_RESET_CMD)
-		return -EINVAL;
-
-	priv = platform_get_drvdata(pdev);
-	if (!priv)
-		return -EINVAL;
-
-	adsp_dev = (struct subsys_device *)priv->pil_h;
-	if (!adsp_dev)
-		return -EINVAL;
-
-	dev_err(&pdev->dev, "requesting for ADSP restart\n");
-
-	/* subsystem_restart_dev has worker queue to handle */
-	rc = subsystem_restart_dev(adsp_dev);
-	if (rc) {
-		dev_err(&pdev->dev, "subsystem_restart_dev failed\n");
-		return rc;
-	}
-
-	dev_dbg(&pdev->dev, "ADSP restarted\n");
-	return count;
 }
 
 static ssize_t adsp_boot_store(struct kobject *kobj,

@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2014, 2017-2018 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -160,15 +160,17 @@ static struct slim_driver audio_slimslave_driver = {
 	.suspend = audio_slimslave_suspend,
 };
 
-int __init audio_slimslave_init(void)
+static int __init audio_slimslave_init(void)
 {
 	return slim_driver_register(&audio_slimslave_driver);
 }
+module_init(audio_slimslave_init);
 
-void audio_slimslave_exit(void)
+static void __exit audio_slimslave_exit(void)
 {
-	slim_driver_unregister(&audio_slimslave_driver);
+
 }
+module_exit(audio_slimslave_exit);
 
 /* Module information */
 MODULE_DESCRIPTION("Audio side Slimbus slave driver");

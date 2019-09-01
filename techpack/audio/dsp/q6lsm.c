@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013-2018, Linux Foundation. All rights reserved.
+ * Copyright (c) 2013-2017, Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -31,11 +31,10 @@
 #include <dsp/q6core.h>
 #include <dsp/q6lsm.h>
 #include <dsp/q6afe-v2.h>
-#include <dsp/q6common.h>
 #include <dsp/audio_cal_utils.h>
 #include "adsp_err.h"
 
-#define APR_TIMEOUT	(HZ)
+#define APR_TIMEOUT	(5 * HZ)
 #define LSM_ALIGN_BOUNDARY 512
 #define LSM_SAMPLE_RATE 16000
 #define QLSM_PARAM_ID_MINOR_VERSION 1
@@ -74,9 +73,12 @@ struct lsm_common {
 	struct mutex apr_lock;
 };
 
-static struct lsm_common lsm_common;
-static DEFINE_MUTEX(session_lock);
+struct lsm_module_param_ids {
+	uint32_t module_id;
+	uint32_t param_id;
+};
 
+static struct lsm_common lsm_common;
 /*
  * mmap_handle_p can point either client->sound_model.mem_map_handle or
  * lsm_common.mmap_handle_for_cal.
@@ -89,30 +91,43 @@ static spinlock_t lsm_session_lock;
 static struct lsm_client *lsm_session[LSM_MAX_SESSION_ID + 1];
 
 static int q6lsm_mmapcallback(struct apr_client_data *data, void *priv);
-static int q6lsm_send_cal(struct lsm_client *client,
-		u32 set_params_opcode, struct lsm_params_info_v2 *p_info);
+static int q6lsm_send_cal(struct lsm_client *client, u32 set_params_opcode);
 static int q6lsm_memory_map_regions(struct lsm_client *client,
 				    dma_addr_t dma_addr_p, uint32_t dma_buf_sz,
 				    uint32_t *mmap_p);
 static int q6lsm_memory_unmap_regions(struct lsm_client *client,
 				      uint32_t handle);
 
-static int q6lsm_get_session_id_from_lsm_client(struct lsm_client *client)
+static void q6lsm_set_param_hdr_info(
+		struct lsm_set_params_hdr *param_hdr,
+		u32 payload_size, u32 addr_lsw, u32 addr_msw,
+		u32 mmap_handle)
 {
-	int n;
-
-	for (n = LSM_MIN_SESSION_ID; n <= LSM_MAX_SESSION_ID; n++) {
-		if (lsm_session[n] == client)
-			return n;
-	}
-	pr_err("%s: cannot find matching lsm client. client = %pa\n",
-		__func__, client);
-	return LSM_INVALID_SESSION_ID;
+	param_hdr->data_payload_size = payload_size;
+	param_hdr->data_payload_addr_lsw = addr_lsw;
+	param_hdr->data_payload_addr_msw = addr_msw;
+	param_hdr->mem_map_handle = mmap_handle;
 }
 
-static bool q6lsm_is_valid_lsm_client(struct lsm_client *client)
+static void q6lsm_set_param_common(
+		struct lsm_param_payload_common *common,
+		struct lsm_module_param_ids *ids,
+		u32 param_size, u32 set_param_version)
 {
-	return q6lsm_get_session_id_from_lsm_client(client) ? 1 : 0;
+	common->module_id = ids->module_id;
+	common->param_id = ids->param_id;
+
+	switch (set_param_version) {
+	case LSM_SESSION_CMD_SET_PARAMS_V2:
+		common->p_size.param_size = param_size;
+		break;
+	case LSM_SESSION_CMD_SET_PARAMS:
+	default:
+		common->p_size.sr.param_size =
+			(u16) param_size;
+		common->p_size.sr.reserved = 0;
+		break;
+	}
 }
 
 static int q6lsm_callback(struct apr_client_data *data, void *priv)
@@ -133,13 +148,6 @@ static int q6lsm_callback(struct apr_client_data *data, void *priv)
 			 __func__, data->opcode, data->reset_event,
 			 data->reset_proc);
 
-		mutex_lock(&session_lock);
-		if (!client || !q6lsm_is_valid_lsm_client(client)) {
-			pr_err("%s: client already freed/invalid, return\n",
-				__func__);
-			mutex_unlock(&session_lock);
-			return 0;
-		}
 		apr_reset(client->apr);
 		client->apr = NULL;
 		atomic_set(&client->cmd_state, CMD_STATE_CLEARED);
@@ -149,7 +157,6 @@ static int q6lsm_callback(struct apr_client_data *data, void *priv)
 		mutex_lock(&lsm_common.cal_data[LSM_CUSTOM_TOP_IDX]->lock);
 		lsm_common.set_custom_topology = 1;
 		mutex_unlock(&lsm_common.cal_data[LSM_CUSTOM_TOP_IDX]->lock);
-		mutex_unlock(&session_lock);
 		return 0;
 	}
 
@@ -195,10 +202,8 @@ static int q6lsm_callback(struct apr_client_data *data, void *priv)
 		case LSM_SESSION_CMD_EOB:
 		case LSM_SESSION_CMD_READ:
 		case LSM_SESSION_CMD_OPEN_TX_V2:
-		case LSM_SESSION_CMD_OPEN_TX_V3:
 		case LSM_CMD_ADD_TOPOLOGIES:
 		case LSM_SESSION_CMD_SET_PARAMS_V2:
-		case LSM_SESSION_CMD_SET_PARAMS_V3:
 			if (token != client->session &&
 			    payload[0] !=
 				LSM_SESSION_CMD_DEREGISTER_SOUND_MODEL) {
@@ -288,15 +293,6 @@ static int q6lsm_mmap_apr_dereg(void)
 	return 0;
 }
 
-/**
- * q6lsm_client_alloc -
- *       Allocate session for LSM client
- *
- * @cb: callback fn
- * @priv: private data
- *
- * Returns LSM client handle on success or NULL on failure
- */
 struct lsm_client *q6lsm_client_alloc(lsm_app_cb cb, void *priv)
 {
 	struct lsm_client *client;
@@ -345,15 +341,7 @@ fail:
 	q6lsm_client_free(client);
 	return NULL;
 }
-EXPORT_SYMBOL(q6lsm_client_alloc);
 
-/**
- * q6lsm_client_free -
- *       Performs LSM client free
- *
- * @client: LSM client handle
- *
- */
 void q6lsm_client_free(struct lsm_client *client)
 {
 	if (!client)
@@ -362,7 +350,6 @@ void q6lsm_client_free(struct lsm_client *client)
 		pr_err("%s: Invalid Session %d\n", __func__, client->session);
 		return;
 	}
-	mutex_lock(&session_lock);
 	apr_deregister(client->apr);
 	client->mmap_apr = NULL;
 	q6lsm_session_free(client);
@@ -370,9 +357,7 @@ void q6lsm_client_free(struct lsm_client *client)
 	mutex_destroy(&client->cmd_lock);
 	kfree(client);
 	client = NULL;
-	mutex_unlock(&session_lock);
 }
-EXPORT_SYMBOL(q6lsm_client_free);
 
 /*
  * q6lsm_apr_send_pkt : If wait == true, hold mutex to prevent from preempting
@@ -459,184 +444,6 @@ static void q6lsm_add_hdr(struct lsm_client *client, struct apr_hdr *hdr,
 		hdr->token = client->session;
 }
 
-static int q6lsm_pack_params(u8 *dest, struct param_hdr_v3 *param_info,
-			     u8 *param_data, size_t *final_length,
-			     u32 set_param_opcode)
-{
-	bool iid_supported = q6common_is_instance_id_supported();
-	union param_hdrs *param_hdr = NULL;
-	u32 param_size = param_info->param_size;
-	size_t hdr_size;
-	size_t provided_size = *final_length;
-
-	hdr_size = iid_supported ? sizeof(struct param_hdr_v3) :
-				   sizeof(struct param_hdr_v2);
-	if (provided_size < hdr_size) {
-		pr_err("%s: Provided size %zu is not large enough, need %zu\n",
-		       __func__, provided_size, hdr_size);
-		return -EINVAL;
-	}
-
-	if (iid_supported) {
-		memcpy(dest, param_info, hdr_size);
-	} else {
-		/* MID, PID and structure size are the same in V1 and V2 */
-		param_hdr = (union param_hdrs *) dest;
-		param_hdr->v2.module_id = param_info->module_id;
-		param_hdr->v2.param_id = param_info->param_id;
-
-		switch (set_param_opcode) {
-		case LSM_SESSION_CMD_SET_PARAMS_V2:
-			param_hdr->v2.param_size = param_size;
-			break;
-		case LSM_SESSION_CMD_SET_PARAMS:
-		default:
-			if (param_size > U16_MAX) {
-				pr_err("%s: Invalid param size %d\n", __func__,
-				       param_size);
-				return -EINVAL;
-			}
-
-			param_hdr->v1.param_size = param_size;
-			param_hdr->v1.reserved = 0;
-			break;
-		}
-	}
-
-	*final_length = hdr_size;
-
-	if (param_data != NULL) {
-		if (provided_size < hdr_size + param_size) {
-			pr_err("%s: Provided size %zu is not large enough, need %zu\n",
-			       __func__, provided_size, hdr_size + param_size);
-			return -EINVAL;
-		}
-		memcpy(dest + hdr_size, param_data, param_size);
-		*final_length += param_size;
-	}
-	return 0;
-}
-
-static int q6lsm_set_params_v2(struct lsm_client *client,
-			       struct mem_mapping_hdr *mem_hdr,
-			       uint8_t *param_data, uint32_t param_size,
-			       uint32_t set_param_opcode)
-{
-	struct lsm_session_cmd_set_params_v2 *lsm_set_param = NULL;
-	uint32_t pkt_size = 0;
-	int ret;
-
-	pkt_size = sizeof(struct lsm_session_cmd_set_params_v2);
-	/* Only include param size in packet size when inband */
-	if (param_data != NULL)
-		pkt_size += param_size;
-
-	lsm_set_param = kzalloc(pkt_size, GFP_KERNEL);
-	if (!lsm_set_param)
-		return -ENOMEM;
-
-	q6lsm_add_hdr(client, &lsm_set_param->apr_hdr, pkt_size, true);
-	lsm_set_param->apr_hdr.opcode = set_param_opcode;
-	lsm_set_param->payload_size = param_size;
-
-	if (mem_hdr != NULL) {
-		lsm_set_param->mem_hdr = *mem_hdr;
-	} else if (param_data != NULL) {
-		memcpy(lsm_set_param->param_data, param_data, param_size);
-	} else {
-		pr_err("%s: Received NULL pointers for both memory header and data\n",
-		       __func__);
-		ret = -EINVAL;
-		goto done;
-	}
-
-	ret = q6lsm_apr_send_pkt(client, client->apr, lsm_set_param, true,
-				 NULL);
-done:
-	kfree(lsm_set_param);
-	return ret;
-}
-
-static int q6lsm_set_params_v3(struct lsm_client *client,
-			       struct mem_mapping_hdr *mem_hdr,
-			       uint8_t *param_data, uint32_t param_size)
-{
-	struct lsm_session_cmd_set_params_v3 *lsm_set_param = NULL;
-	uint16_t pkt_size = 0;
-	int ret = 0;
-
-	pkt_size = sizeof(struct lsm_session_cmd_set_params_v3);
-	/* Only include param size in packet size when inband */
-	if (param_data != NULL)
-		pkt_size += param_size;
-
-	lsm_set_param = kzalloc(pkt_size, GFP_KERNEL);
-	if (!lsm_set_param)
-		return -ENOMEM;
-
-	q6lsm_add_hdr(client, &lsm_set_param->apr_hdr, pkt_size, true);
-	lsm_set_param->apr_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS_V3;
-	lsm_set_param->payload_size = param_size;
-
-	if (mem_hdr != NULL) {
-		lsm_set_param->mem_hdr = *mem_hdr;
-	} else if (param_data != NULL) {
-		memcpy(lsm_set_param->param_data, param_data, param_size);
-	} else {
-		pr_err("%s: Received NULL pointers for both memory header and data\n",
-		       __func__);
-		ret = -EINVAL;
-		goto done;
-	}
-
-	ret = q6lsm_apr_send_pkt(client, client->apr, lsm_set_param, true,
-				 NULL);
-done:
-	kfree(lsm_set_param);
-	return ret;
-}
-
-static int q6lsm_set_params(struct lsm_client *client,
-			    struct mem_mapping_hdr *mem_hdr,
-			    uint8_t *param_data, uint32_t param_size,
-			    uint32_t set_param_opcode)
-
-{
-	if (q6common_is_instance_id_supported())
-		return q6lsm_set_params_v3(client, mem_hdr, param_data,
-					   param_size);
-	else
-		return q6lsm_set_params_v2(client, mem_hdr, param_data,
-					   param_size, set_param_opcode);
-}
-
-static int q6lsm_pack_and_set_params(struct lsm_client *client,
-				     struct param_hdr_v3 *param_info,
-				     uint8_t *param_data,
-				     uint32_t set_param_opcode)
-
-{
-	u8 *packed_data = NULL;
-	size_t total_size = 0;
-	int ret = 0;
-
-	total_size = sizeof(union param_hdrs) + param_info->param_size;
-	packed_data = kzalloc(total_size, GFP_KERNEL);
-	if (!packed_data)
-		return -ENOMEM;
-
-	ret = q6lsm_pack_params(packed_data, param_info, param_data,
-				&total_size, set_param_opcode);
-	if (ret)
-		goto done;
-
-	ret = q6lsm_set_params(client, NULL, packed_data, total_size,
-			       set_param_opcode);
-
-done:
-	kfree(packed_data);
-	return ret;
-}
 
 static int q6lsm_send_custom_topologies(struct lsm_client *client)
 {
@@ -721,95 +528,6 @@ done:
 	return rc;
 }
 
-static int q6lsm_get_topology_for_app_type(struct lsm_client *client,
-				int app_type, uint32_t *topology)
-{
-	int rc = -EINVAL;
-	struct cal_block_data *cal_block = NULL;
-	struct audio_cal_info_lsm_top *lsm_top;
-	struct list_head *ptr;
-
-	if (lsm_common.cal_data[LSM_TOP_IDX] == NULL) {
-		pr_err("%s: LSM_TOP_IDX invalid\n", __func__);
-		return rc;
-	}
-
-	mutex_lock(&lsm_common.cal_data[LSM_TOP_IDX]->lock);
-	list_for_each(ptr, &lsm_common.cal_data[LSM_TOP_IDX]->cal_blocks) {
-		cal_block = list_entry(ptr, struct cal_block_data, list);
-		if (!cal_block) {
-			pr_err("%s: Cal block for LSM_TOP_IDX not found\n",
-				__func__);
-			break;
-		}
-
-		lsm_top = (struct audio_cal_info_lsm_top *) cal_block->cal_info;
-		if (!lsm_top) {
-			pr_err("%s: cal_info for LSM_TOP_IDX not found\n",
-				__func__);
-			break;
-		}
-
-		pr_debug("%s: checking topology 0x%x, app_type 0x%x\n",
-			 __func__, lsm_top->topology, lsm_top->app_type);
-
-		if (app_type == 0  || lsm_top->app_type == app_type) {
-			*topology = lsm_top->topology;
-			rc = 0;
-			break;
-		}
-	}
-	mutex_unlock(&lsm_common.cal_data[LSM_TOP_IDX]->lock);
-
-	pr_debug("%s: found topology_id = 0x%x, app_type = 0x%x\n",
-		 __func__, *topology, app_type);
-
-	return rc;
-}
-
-static int q6lsm_do_open_v3(struct lsm_client *client)
-{
-	int rc, app_type;
-	struct lsm_stream_cmd_open_tx_v3 *open_v3;
-	size_t cmd_size = 0;
-	int stage_idx = LSM_STAGE_INDEX_FIRST;
-	uint32_t topology_id = 0, *uint32_ptr = NULL;
-
-	cmd_size = sizeof(struct lsm_stream_cmd_open_tx_v3);
-	cmd_size += client->num_stages * sizeof(struct lsm_stream_stage_info);
-	open_v3 = kzalloc(cmd_size, GFP_KERNEL);
-	if (!open_v3)
-		return -ENOMEM;
-
-	q6lsm_add_hdr(client, &open_v3->hdr, cmd_size, true);
-	open_v3->hdr.opcode = LSM_SESSION_CMD_OPEN_TX_V3;
-	open_v3->num_stages = client->num_stages;
-	uint32_ptr = &open_v3->num_stages;
-	uint32_ptr++;
-
-	for (; stage_idx < client->num_stages; stage_idx++) {
-		app_type = client->stage_cfg[stage_idx].app_type;
-		rc = q6lsm_get_topology_for_app_type(client, app_type, &topology_id);
-		if (rc) {
-			pr_err("%s: failed to get topology for stage %d\n",
-				 __func__, stage_idx);
-			return -EINVAL;
-		}
-		*uint32_ptr++ = topology_id;
-		*uint32_ptr++ = client->stage_cfg[stage_idx].lpi_enable;
-	}
-
-	rc = q6lsm_apr_send_pkt(client, client->apr, open_v3, true, NULL);
-	if (rc)
-		pr_err("%s: open_v3 failed, err = %d\n", __func__, rc);
-	else
-		client->use_topology = true;
-
-	kfree(open_v3);
-	return rc;
-
-}
-
 static int q6lsm_do_open_v2(struct lsm_client *client,
 		uint16_t app_id)
 {
@@ -843,8 +561,9 @@ static int q6lsm_do_open_v2(struct lsm_client *client,
 		goto unlock;
 	}
 
-	pr_debug("%s: topology_id = 0x%x, app_type = 0x%x\n",
-		 __func__, lsm_top->topology, lsm_top->app_type);
+	pr_debug("%s: topology_id = 0x%x, acdb_id = 0x%x, app_type = 0x%x\n",
+		 __func__, lsm_top->topology, lsm_top->acdb_id,
+		 lsm_top->app_type);
 
 	if (lsm_top->topology == 0) {
 		pr_err("%s: toplogy id not sent for app_type 0x%x\n",
@@ -874,60 +593,20 @@ done:
 
 }
 
-/**
- * q6lsm_sm_set_param_data -
- *       Update sound model param data
- *
- * @client: LSM client handle
- * @p_info: param info
- * @offset: pointer to retrieve size
- *
- */
 void q6lsm_sm_set_param_data(struct lsm_client *client,
-		struct lsm_params_info_v2 *p_info,
+		struct lsm_params_info *p_info,
 		size_t *offset)
 {
-	struct param_hdr_v3 param_hdr;
-	int ret;
-	struct lsm_sound_model *sm;
+	struct lsm_param_payload_common *param;
 
-	sm = &client->stage_cfg[p_info->stage_idx].sound_model;
-	memset(&param_hdr, 0, sizeof(param_hdr));
-
-	param_hdr.module_id = p_info->module_id;
-	param_hdr.instance_id = p_info->instance_id;
-	param_hdr.param_id = p_info->param_id;
-	param_hdr.param_size = p_info->param_size;
-
-	ret = q6lsm_pack_params(sm->data, &param_hdr,
-				NULL, offset, LSM_SESSION_CMD_SET_PARAMS_V2);
-	if (ret)
-		pr_err("%s: Failed to pack params, error %d\n", __func__, ret);
+	param = (struct lsm_param_payload_common *)
+			client->sound_model.data;
+	param->module_id = p_info->module_id;
+	param->param_id = p_info->param_id;
+	param->p_size.param_size = client->sound_model.size;
+	*offset = sizeof(*param);
 }
-EXPORT_SYMBOL(q6lsm_sm_set_param_data);
 
-/**
- * q6lsm_support_multi_stage_detection -
- *       check for multi-stage support in adsp lsm framework service
- *
- * Returns true if multi-stage support available, else false
- */
-bool q6lsm_adsp_supports_multi_stage_detection(void)
-{
-	return q6core_get_avcs_api_version_per_service(
-			APRV2_IDS_SERVICE_ID_ADSP_LSM_V) >= LSM_API_VERSION_V3;
-}
-EXPORT_SYMBOL(q6lsm_adsp_supports_multi_stage_detection);
-
-/**
- * q6lsm_open -
- *       command to open LSM session
- *
- * @client: LSM client handle
- * @app_id: App ID for LSM
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_open(struct lsm_client *client, uint16_t app_id)
 {
 	int rc = 0;
@@ -942,13 +621,9 @@ int q6lsm_open(struct lsm_client *client, uint16_t app_id)
 	}
 
 	/* Try to open with topology first */
-	if ((client->stage_cfg[LSM_STAGE_INDEX_FIRST].app_type != 0) &&
-		q6lsm_adsp_supports_multi_stage_detection())
-		rc = q6lsm_do_open_v3(client);
-	else
-		rc = q6lsm_do_open_v2(client, app_id);
+	rc = q6lsm_do_open_v2(client, app_id);
 	if (!rc)
-		/* open_v2/v3 was successful */
+		/* open_v2 was successful */
 		goto done;
 
 	pr_debug("%s: try without topology\n",
@@ -979,352 +654,358 @@ done:
 	pr_debug("%s: leave %d\n", __func__, rc);
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_open);
 
-static int q6lsm_send_confidence_levels(struct lsm_client *client,
-					struct param_hdr_v3 *param_info,
-					uint32_t set_param_opcode)
+static int q6lsm_send_confidence_levels(
+		struct lsm_client *client,
+		struct lsm_module_param_ids *ids,
+		u32 set_param_opcode)
 {
-	struct lsm_param_confidence_levels *conf_levels = NULL;
-	uint32_t num_conf_levels = client->num_confidence_levels;
+	u8 *packet;
+	size_t pkt_size;
+	struct lsm_cmd_set_params_conf *conf_params;
+	struct apr_hdr *msg_hdr;
+	struct lsm_param_min_confidence_levels *cfl;
 	uint8_t i = 0;
 	uint8_t padd_size = 0;
-	uint32_t param_size = 0;
-	int rc = 0;
+	u8 *conf_levels;
+	int rc;
+	u32 payload_size, param_size;
 
-	/* Data must be 4 byte aligned so add any necessary padding. */
-	padd_size = (4 - (num_conf_levels % 4)) - 1;
-	param_size = (sizeof(uint8_t) + num_conf_levels + padd_size) *
-		     sizeof(uint8_t);
-	param_info->param_size = param_size;
-	pr_debug("%s: Set Conf Levels PARAM SIZE = %d\n", __func__, param_size);
+	padd_size = (4 - (client->num_confidence_levels % 4)) - 1;
+	pkt_size = sizeof(*conf_params) + padd_size +
+		   client->num_confidence_levels;
 
-	conf_levels = kzalloc(param_size, GFP_KERNEL);
-	if (!conf_levels)
+	packet = kzalloc(pkt_size, GFP_KERNEL);
+	if (!packet)
 		return -ENOMEM;
 
-	conf_levels->num_confidence_levels = num_conf_levels;
-	pr_debug("%s: Num conf_level = %d\n", __func__, num_conf_levels);
+	conf_params = (struct lsm_cmd_set_params_conf *) packet;
+	conf_levels = (u8 *) (packet + sizeof(*conf_params));
+	msg_hdr = &conf_params->msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      pkt_size, true);
+	msg_hdr->opcode = set_param_opcode;
+	payload_size = pkt_size - sizeof(*msg_hdr) -
+		       sizeof(conf_params->params_hdr);
+	q6lsm_set_param_hdr_info(&conf_params->params_hdr,
+				 payload_size, 0, 0, 0);
+	cfl = &conf_params->conf_payload;
+	param_size = ((sizeof(uint8_t) + padd_size +
+		       client->num_confidence_levels)) *
+		      sizeof(uint8_t);
+	q6lsm_set_param_common(&cfl->common, ids,
+			       param_size, set_param_opcode);
+	cfl->num_confidence_levels = client->num_confidence_levels;
 
-	memcpy(conf_levels->confidence_levels, client->confidence_levels,
-	       num_conf_levels);
-	for (i = 0; i < num_conf_levels; i++)
-		pr_debug("%s: Confidence_level[%d] = %d\n", __func__, i,
-			 conf_levels->confidence_levels[i]);
+	pr_debug("%s: CMD PARAM SIZE = %d\n",
+		 __func__, param_size);
+	pr_debug("%s: Num conf_level = %d\n",
+		 __func__, client->num_confidence_levels);
 
-	rc = q6lsm_pack_and_set_params(client, param_info,
-				       (uint8_t *) conf_levels,
-				       set_param_opcode);
+	memcpy(conf_levels, client->confidence_levels,
+	       client->num_confidence_levels);
+	for (i = 0; i < client->num_confidence_levels; i++)
+		pr_debug("%s: Confidence_level[%d] = %d\n",
+			 __func__, i, conf_levels[i]);
+
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				packet, true, NULL);
 	if (rc)
-		pr_err("%s: Send confidence_levels cmd failed, err = %d\n",
-		       __func__, rc);
-	kfree(conf_levels);
+		pr_err("%s: confidence_levels cmd failed, err = %d\n",
+			__func__, rc);
+	kfree(packet);
 	return rc;
 }
 
 static int q6lsm_send_param_opmode(struct lsm_client *client,
-				   struct param_hdr_v3 *param_info,
-				   u32 set_param_opcode)
+		struct lsm_module_param_ids *opmode_ids,
+		u32 set_param_opcode)
 {
-	struct lsm_param_op_mode op_mode;
-	int rc = 0;
+	int rc;
+	struct lsm_cmd_set_params_opmode opmode_params;
+	struct apr_hdr  *msg_hdr;
 
-	memset(&op_mode, 0, sizeof(op_mode));
-	param_info->param_size = sizeof(op_mode);
+	struct lsm_param_op_mode *op_mode;
+	u32 data_payload_size, param_size;
 
-	op_mode.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	op_mode.mode = client->mode;
-	pr_debug("%s: mode = 0x%x", __func__, op_mode.mode);
+	msg_hdr = &opmode_params.msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(opmode_params), true);
+	msg_hdr->opcode = set_param_opcode;
+	data_payload_size = sizeof(opmode_params) -
+			    sizeof(*msg_hdr) -
+			    sizeof(opmode_params.params_hdr);
+	q6lsm_set_param_hdr_info(&opmode_params.params_hdr,
+				 data_payload_size, 0, 0, 0);
+	op_mode = &opmode_params.op_mode;
 
-	rc = q6lsm_pack_and_set_params(client, param_info, (uint8_t *) &op_mode,
-				       set_param_opcode);
+
+	param_size = sizeof(struct lsm_param_op_mode) -
+		     sizeof(op_mode->common);
+	q6lsm_set_param_common(&op_mode->common,
+			       opmode_ids, param_size,
+			       set_param_opcode);
+	op_mode->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	op_mode->mode = client->mode;
+	op_mode->reserved = 0;
+	pr_debug("%s: mode = 0x%x", __func__, op_mode->mode);
+
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&opmode_params, true, NULL);
 	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+		       __func__, msg_hdr->opcode, rc);
 
 	pr_debug("%s: leave %d\n", __func__, rc);
 	return rc;
 }
 
-/**
- * set_lsm_port -
- *       Update LSM AFE port
- *
- */
 void set_lsm_port(int lsm_port)
 {
 	lsm_afe_port = lsm_port;
 }
-EXPORT_SYMBOL(set_lsm_port);
 
 int get_lsm_port(void)
 {
 	return lsm_afe_port;
 }
 
-/**
- * q6lsm_set_port_connected -
- *       command to set LSM port connected
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_set_port_connected(struct lsm_client *client)
 {
-	struct lsm_param_connect_to_port connect_port;
-	struct param_hdr_v3 connectport_hdr;
-	u32 set_param_opcode = 0;
-	int rc = 0;
-
-	memset(&connect_port, 0, sizeof(connect_port));
-	memset(&connectport_hdr, 0, sizeof(connectport_hdr));
+	int rc;
+	struct lsm_cmd_set_connectport connectport;
+	struct lsm_module_param_ids connectport_ids;
+	struct apr_hdr *msg_hdr;
+	struct lsm_param_connect_to_port *connect_to_port;
+	u32 data_payload_size, param_size, set_param_opcode;
 
 	if (client->use_topology) {
 		set_param_opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
-		connectport_hdr.module_id = LSM_MODULE_ID_FRAMEWORK;
+		connectport_ids.module_id = LSM_MODULE_ID_FRAMEWORK;
+		connectport_ids.param_id = LSM_PARAM_ID_CONNECT_TO_PORT;
 	} else {
 		set_param_opcode = LSM_SESSION_CMD_SET_PARAMS;
-		connectport_hdr.module_id = LSM_MODULE_ID_VOICE_WAKEUP;
+		connectport_ids.module_id = LSM_MODULE_ID_VOICE_WAKEUP;
+		connectport_ids.param_id = LSM_PARAM_ID_CONNECT_TO_PORT;
 	}
-	connectport_hdr.instance_id = INSTANCE_ID_0;
-	connectport_hdr.param_id = LSM_PARAM_ID_CONNECT_TO_PORT;
-	connectport_hdr.param_size = sizeof(connect_port);
-
 	client->connect_to_port = get_lsm_port();
-	connect_port.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	connect_port.port_id = client->connect_to_port;
 
-	rc = q6lsm_pack_and_set_params(client, &connectport_hdr,
-				       (uint8_t *) &connect_port,
-				       set_param_opcode);
+	msg_hdr = &connectport.msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(connectport), true);
+	msg_hdr->opcode = set_param_opcode;
+	data_payload_size = sizeof(connectport) -
+			    sizeof(*msg_hdr) -
+			    sizeof(connectport.params_hdr);
+	q6lsm_set_param_hdr_info(&connectport.params_hdr,
+				 data_payload_size, 0, 0, 0);
+	connect_to_port = &connectport.connect_to_port;
+
+	param_size = (sizeof(struct lsm_param_connect_to_port) -
+		      sizeof(connect_to_port->common));
+	q6lsm_set_param_common(&connect_to_port->common,
+			       &connectport_ids, param_size,
+			       set_param_opcode);
+	connect_to_port->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	connect_to_port->port_id = client->connect_to_port;
+	connect_to_port->reserved = 0;
+	pr_debug("%s: port= %d", __func__, connect_to_port->port_id);
+
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&connectport, true, NULL);
 	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+			__func__, msg_hdr->opcode, rc);
+
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_set_port_connected);
-
 static int q6lsm_send_param_polling_enable(struct lsm_client *client,
-					   bool poll_en,
-					   struct param_hdr_v3 *param_info,
-					   u32 set_param_opcode)
+		bool poll_en,
+		struct lsm_module_param_ids *poll_enable_ids,
+		u32 set_param_opcode)
 {
-	struct lsm_param_poll_enable polling_enable;
 	int rc = 0;
+	struct lsm_cmd_poll_enable cmd;
+	struct apr_hdr  *msg_hdr;
+	struct lsm_param_poll_enable *poll_enable;
+	u32 data_payload_size, param_size;
 
-	memset(&polling_enable, 0, sizeof(polling_enable));
-	param_info->param_size = sizeof(polling_enable);
+	msg_hdr = &cmd.msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(struct lsm_cmd_poll_enable), true);
+	msg_hdr->opcode = set_param_opcode;
+	data_payload_size = sizeof(struct lsm_cmd_poll_enable) -
+			    sizeof(struct apr_hdr) -
+			    sizeof(struct lsm_set_params_hdr);
+	q6lsm_set_param_hdr_info(&cmd.params_hdr,
+				 data_payload_size, 0, 0, 0);
+	poll_enable = &cmd.poll_enable;
 
-	polling_enable.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	polling_enable.polling_enable = (poll_en) ? 1 : 0;
+	param_size = (sizeof(struct lsm_param_poll_enable) -
+		      sizeof(poll_enable->common));
+	q6lsm_set_param_common(&poll_enable->common,
+			       poll_enable_ids, param_size,
+			       set_param_opcode);
+	poll_enable->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	poll_enable->polling_enable = (poll_en) ? 1 : 0;
+	pr_debug("%s: poll enable= %d", __func__, poll_enable->polling_enable);
 
-	rc = q6lsm_pack_and_set_params(client, param_info,
-				       (uint8_t *) &polling_enable,
-				       set_param_opcode);
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&cmd, true, NULL);
 	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+		       __func__, msg_hdr->opcode, rc);
+
 	return rc;
 }
 
-/**
- * q6lsm_set_fwk_mode_cfg -
- *       command to set LSM fwk mode cfg
- *
- * @client: LSM client handle
- * @event_mode: mode for fwk cfg
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_set_fwk_mode_cfg(struct lsm_client *client,
 			   uint32_t event_mode)
 {
-	struct lsm_param_fwk_mode_cfg fwk_mode_cfg;
-	struct param_hdr_v3 fwk_mode_cfg_hdr;
 	int rc = 0;
+	struct lsm_cmd_set_fwk_mode_cfg cmd;
+	struct lsm_module_param_ids fwk_mode_cfg_ids;
+	struct apr_hdr  *msg_hdr;
+	struct lsm_param_fwk_mode_cfg *fwk_mode_cfg;
+	u32 data_payload_size, param_size, set_param_opcode;
 
-	memset(&fwk_mode_cfg, 0, sizeof(fwk_mode_cfg));
-	memset(&fwk_mode_cfg_hdr, 0, sizeof(fwk_mode_cfg_hdr));
-
-	if (!client->use_topology) {
+	if (client->use_topology) {
+		set_param_opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+		fwk_mode_cfg_ids.module_id = LSM_MODULE_ID_FRAMEWORK;
+		fwk_mode_cfg_ids.param_id = LSM_PARAM_ID_FWK_MODE_CONFIG;
+	} else {
 		pr_debug("%s: Ignore sending event mode\n", __func__);
 		return rc;
 	}
 
-	fwk_mode_cfg_hdr.module_id = LSM_MODULE_ID_FRAMEWORK;
-	fwk_mode_cfg_hdr.instance_id = INSTANCE_ID_0;
-	fwk_mode_cfg_hdr.param_id = LSM_PARAM_ID_FWK_MODE_CONFIG;
-	fwk_mode_cfg_hdr.param_size = sizeof(fwk_mode_cfg);
+	msg_hdr = &cmd.msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(struct lsm_cmd_set_fwk_mode_cfg), true);
+	msg_hdr->opcode = set_param_opcode;
+	data_payload_size = sizeof(struct lsm_cmd_set_fwk_mode_cfg) -
+			    sizeof(struct apr_hdr) -
+			    sizeof(struct lsm_set_params_hdr);
+	q6lsm_set_param_hdr_info(&cmd.params_hdr,
+				 data_payload_size, 0, 0, 0);
+	fwk_mode_cfg = &cmd.fwk_mode_cfg;
 
-	fwk_mode_cfg.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	fwk_mode_cfg.mode = event_mode;
-	pr_debug("%s: mode = %d\n", __func__, fwk_mode_cfg.mode);
+	param_size = (sizeof(struct lsm_param_fwk_mode_cfg) -
+		      sizeof(fwk_mode_cfg->common));
+	q6lsm_set_param_common(&fwk_mode_cfg->common,
+			       &fwk_mode_cfg_ids, param_size,
+			       set_param_opcode);
 
-	rc = q6lsm_pack_and_set_params(client, &fwk_mode_cfg_hdr,
-				       (uint8_t *) &fwk_mode_cfg,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
+	fwk_mode_cfg->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	fwk_mode_cfg->mode = event_mode;
+	pr_debug("%s: mode = %d\n", __func__, fwk_mode_cfg->mode);
+
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&cmd, true, NULL);
 	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+		       __func__, msg_hdr->opcode, rc);
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_set_fwk_mode_cfg);
 
-static int q6lsm_arrange_mch_map(uint8_t *ch_map, int ch_cnt)
+static int q6lsm_arrange_mch_map(struct lsm_param_media_fmt *media_fmt,
+			 int channel_count)
 {
-	int ch_idx;
-	u8 mch_map[LSM_V3P0_MAX_NUM_CHANNELS] = {
-			PCM_CHANNEL_FL, PCM_CHANNEL_FR, PCM_CHANNEL_FC,
-			PCM_CHANNEL_LS, PCM_CHANNEL_RS, PCM_CHANNEL_LFE,
-			PCM_CHANNEL_LB, PCM_CHANNEL_RB, PCM_CHANNEL_CS};
-
-
-	if (ch_cnt > LSM_V3P0_MAX_NUM_CHANNELS) {
-		pr_err("%s: invalid num_chan %d\n", __func__, ch_cnt);
-		return -EINVAL;
-	}
-
-	if (ch_cnt == 1) {
-		ch_map[0] = PCM_CHANNEL_FC;
-	} else if (ch_cnt == 4) {
-		ch_map[0] = PCM_CHANNEL_FL;
-		ch_map[1] = PCM_CHANNEL_FR;
-		ch_map[2] = PCM_CHANNEL_LS;
-		ch_map[3] = PCM_CHANNEL_RS;
-	} else {
-		for (ch_idx = 0; ch_idx < ch_cnt; ch_idx++)
-			ch_map[ch_idx] = mch_map[ch_idx];
-	}
-
-	return 0;
-}
-
-/**
- * q6lsm_set_media_fmt_params -
- *       command to set LSM media fmt params
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
-int q6lsm_set_media_fmt_params(struct lsm_client *client)
-{
-	struct lsm_param_media_fmt media_fmt;
-	struct lsm_hw_params in_param = client->in_hw_params;
-	struct param_hdr_v3 media_fmt_hdr;
 	int rc = 0;
 
-	memset(&media_fmt, 0, sizeof(media_fmt));
-	memset(&media_fmt_hdr, 0, sizeof(media_fmt_hdr));
+	memset(media_fmt->channel_mapping, 0, LSM_MAX_NUM_CHANNELS);
 
-	if (!client->use_topology) {
+	switch (channel_count) {
+	case 1:
+		media_fmt->channel_mapping[0] = PCM_CHANNEL_FC;
+		break;
+	case 2:
+		media_fmt->channel_mapping[0] = PCM_CHANNEL_FL;
+		media_fmt->channel_mapping[1] = PCM_CHANNEL_FR;
+		break;
+	case 3:
+		media_fmt->channel_mapping[0] = PCM_CHANNEL_FL;
+		media_fmt->channel_mapping[1] = PCM_CHANNEL_FR;
+		media_fmt->channel_mapping[2] = PCM_CHANNEL_FC;
+		break;
+	case 4:
+		media_fmt->channel_mapping[0] = PCM_CHANNEL_FL;
+		media_fmt->channel_mapping[1] = PCM_CHANNEL_FR;
+		media_fmt->channel_mapping[2] = PCM_CHANNEL_LS;
+		media_fmt->channel_mapping[3] = PCM_CHANNEL_RS;
+		break;
+	default:
+		pr_err("%s: invalid num_chan %d\n", __func__, channel_count);
+		rc = -EINVAL;
+		break;
+	}
+	return rc;
+}
+
+int q6lsm_set_media_fmt_params(struct lsm_client *client)
+{
+	int rc = 0;
+	struct lsm_cmd_set_media_fmt cmd;
+	struct lsm_module_param_ids media_fmt_ids;
+	struct apr_hdr  *msg_hdr;
+	struct lsm_param_media_fmt *media_fmt;
+	u32 data_payload_size, param_size, set_param_opcode;
+	struct lsm_hw_params param = client->hw_params;
+
+	if (client->use_topology) {
+		set_param_opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+		media_fmt_ids.module_id = LSM_MODULE_ID_FRAMEWORK;
+		media_fmt_ids.param_id = LSM_PARAM_ID_MEDIA_FMT;
+	} else {
 		pr_debug("%s: Ignore sending media format\n", __func__);
 		goto err_ret;
 	}
 
-	media_fmt_hdr.module_id = LSM_MODULE_ID_FRAMEWORK;
-	media_fmt_hdr.instance_id = INSTANCE_ID_0;
-	media_fmt_hdr.param_id = LSM_PARAM_ID_MEDIA_FMT;
-	media_fmt_hdr.param_size = sizeof(media_fmt);
+	msg_hdr = &cmd.msg_hdr;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(struct lsm_cmd_set_media_fmt), true);
+	msg_hdr->opcode = set_param_opcode;
+	data_payload_size = sizeof(struct lsm_cmd_set_media_fmt) -
+			    sizeof(struct apr_hdr) -
+			    sizeof(struct lsm_set_params_hdr);
+	q6lsm_set_param_hdr_info(&cmd.params_hdr,
+				 data_payload_size, 0, 0, 0);
+	media_fmt = &cmd.media_fmt;
 
-	media_fmt.minor_version = QLSM_PARAM_ID_MINOR_VERSION_2;
-	media_fmt.sample_rate = in_param.sample_rate;
-	media_fmt.num_channels = in_param.num_chs;
-	media_fmt.bit_width = in_param.sample_size;
-	rc = q6lsm_arrange_mch_map(media_fmt.channel_mapping,
-				   media_fmt.num_channels);
+	param_size = (sizeof(struct lsm_param_media_fmt) -
+		      sizeof(media_fmt->common));
+	q6lsm_set_param_common(&media_fmt->common,
+			       &media_fmt_ids, param_size,
+			       set_param_opcode);
+
+	media_fmt->minor_version = QLSM_PARAM_ID_MINOR_VERSION_2;
+	media_fmt->sample_rate = param.sample_rate;
+	media_fmt->num_channels = param.num_chs;
+	media_fmt->bit_width = param.sample_size;
+
+	rc = q6lsm_arrange_mch_map(media_fmt, media_fmt->num_channels);
 	if (rc)
 		goto err_ret;
 
-	pr_debug("%s: sample rate= %d, channels %d bit width %d\n", __func__,
-		 media_fmt.sample_rate, media_fmt.num_channels,
-		 media_fmt.bit_width);
+	pr_debug("%s: sample rate= %d, channels %d bit width %d\n",
+		 __func__, media_fmt->sample_rate, media_fmt->num_channels,
+		 media_fmt->bit_width);
 
-	rc = q6lsm_pack_and_set_params(client, &media_fmt_hdr,
-				       (uint8_t *) &media_fmt,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&cmd, true, NULL);
 	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+		       __func__, msg_hdr->opcode, rc);
 err_ret:
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_set_media_fmt_params);
 
-/*
- * q6lsm_set_media_fmt_v2_params -
- *       command to set LSM media fmt (version2) params
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
-int q6lsm_set_media_fmt_v2_params(struct lsm_client *client)
-{
-	u8 *param_buf;
-	struct lsm_param_media_fmt_v2 *media_fmt_v2;
-	struct lsm_hw_params *in_param = &client->in_hw_params;
-	struct param_hdr_v3 media_fmt_v2_hdr;
-	int param_len = 0, rc = 0;
-
-	memset(&media_fmt_v2_hdr, 0, sizeof(media_fmt_v2_hdr));
-
-	param_len = sizeof(*media_fmt_v2) +
-		    (sizeof(uint8_t) * in_param->num_chs);
-
-	/* Add padding to make sure total length is 4-byte aligned */
-	if (param_len % 4)
-		param_len += (4 - (param_len % 4));
-
-	param_buf = kzalloc(param_len, GFP_KERNEL);
-	if (!param_buf)
-		return -ENOMEM;
-	media_fmt_v2 = (struct lsm_param_media_fmt_v2 *) param_buf;
-	media_fmt_v2->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	media_fmt_v2->sample_rate = in_param->sample_rate;
-	media_fmt_v2->num_channels = in_param->num_chs;
-	media_fmt_v2->bit_width = in_param->sample_size;
-	rc = q6lsm_arrange_mch_map(media_fmt_v2->channel_mapping,
-				   in_param->num_chs);
-	if (rc)
-		goto err_mch_map;
-
-	media_fmt_v2_hdr.module_id = LSM_MODULE_ID_FRAMEWORK;
-	media_fmt_v2_hdr.instance_id = INSTANCE_ID_0;
-	media_fmt_v2_hdr.param_id = LSM_PARAM_ID_MEDIA_FMT_V2;
-	media_fmt_v2_hdr.param_size = param_len;
-
-	pr_debug("%s: sample rate= %d, channels %d bit width %d\n", __func__,
-		 media_fmt_v2->sample_rate, media_fmt_v2->num_channels,
-		 media_fmt_v2->bit_width);
-
-	rc = q6lsm_pack_and_set_params(client, &media_fmt_v2_hdr,
-				       param_buf,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
-	if (rc)
-		pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
-
-err_mch_map:
-	kfree(param_buf);
-	return rc;
-}
-EXPORT_SYMBOL(q6lsm_set_media_fmt_v2_params);
-
-/**
- * q6lsm_set_data -
- *       Command to set LSM data
- *
- * @client: LSM client handle
- * @mode: LSM detection mode value
- * @detectfailure: flag for detect failure
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_set_data(struct lsm_client *client,
 			   enum lsm_detection_mode mode,
 			   bool detectfailure)
 {
-	struct param_hdr_v3 param_hdr;
 	int rc = 0;
-	struct lsm_params_info_v2 p_info = {0};
-
-	memset(&param_hdr, 0, sizeof(param_hdr));
+	struct lsm_module_param_ids opmode_ids;
+	struct lsm_module_param_ids conf_levels_ids;
 
 	if (!client->confidence_levels) {
 		/*
@@ -1348,28 +1029,29 @@ int q6lsm_set_data(struct lsm_client *client,
 	}
 	client->mode |= detectfailure << 2;
 
-	param_hdr.module_id = LSM_MODULE_ID_VOICE_WAKEUP;
-	param_hdr.instance_id = INSTANCE_ID_0;
-	param_hdr.param_id = LSM_PARAM_ID_OPERATION_MODE;
-	rc = q6lsm_send_param_opmode(client, &param_hdr,
-				     LSM_SESSION_CMD_SET_PARAMS);
+	opmode_ids.module_id = LSM_MODULE_ID_VOICE_WAKEUP;
+	opmode_ids.param_id = LSM_PARAM_ID_OPERATION_MODE;
+
+	rc = q6lsm_send_param_opmode(client, &opmode_ids,
+					LSM_SESSION_CMD_SET_PARAMS);
 	if (rc) {
 		pr_err("%s: Failed to set lsm config params %d\n",
 			__func__, rc);
 		goto err_ret;
 	}
 
-	param_hdr.param_id = LSM_PARAM_ID_MIN_CONFIDENCE_LEVELS;
-	rc = q6lsm_send_confidence_levels(client, &param_hdr,
-					  LSM_SESSION_CMD_SET_PARAMS);
+	conf_levels_ids.module_id = LSM_MODULE_ID_VOICE_WAKEUP;
+	conf_levels_ids.param_id = LSM_PARAM_ID_MIN_CONFIDENCE_LEVELS;
+
+	rc = q6lsm_send_confidence_levels(client, &conf_levels_ids,
+					 LSM_SESSION_CMD_SET_PARAMS);
 	if (rc) {
 		pr_err("%s: Failed to send conf_levels, err = %d\n",
 			__func__, rc);
 		goto err_ret;
 	}
 
-	p_info.stage_idx = LSM_STAGE_INDEX_FIRST;
-	rc = q6lsm_send_cal(client, LSM_SESSION_CMD_SET_PARAMS, &p_info);
+	rc = q6lsm_send_cal(client, LSM_SESSION_CMD_SET_PARAMS);
 	if (rc) {
 		pr_err("%s: Failed to send calibration data %d\n",
 			__func__, rc);
@@ -1379,23 +1061,13 @@ int q6lsm_set_data(struct lsm_client *client,
 err_ret:
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_set_data);
 
-/**
- * q6lsm_register_sound_model -
- *       Register LSM snd model
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_register_sound_model(struct lsm_client *client,
 			       enum lsm_detection_mode mode,
 			       bool detectfailure)
 {
 	int rc;
 	struct lsm_cmd_reg_snd_model cmd;
-	struct lsm_sound_model *sm;
 
 	memset(&cmd, 0, sizeof(cmd));
 	rc = q6lsm_set_data(client, mode, detectfailure);
@@ -1405,19 +1077,18 @@ int q6lsm_register_sound_model(struct lsm_client *client,
 		return rc;
 	}
 
-	sm = &client->stage_cfg[LSM_STAGE_INDEX_FIRST].sound_model;
-
 	q6lsm_add_hdr(client, &cmd.hdr, sizeof(cmd), true);
 	cmd.hdr.opcode = LSM_SESSION_CMD_REGISTER_SOUND_MODEL;
-	cmd.model_addr_lsw = lower_32_bits(sm->phys);
-	cmd.model_addr_msw = msm_audio_populate_upper_32_bits(sm->phys);
-	cmd.model_size = sm->size;
+	cmd.model_addr_lsw = lower_32_bits(client->sound_model.phys);
+	cmd.model_addr_msw = msm_audio_populate_upper_32_bits(
+						client->sound_model.phys);
+	cmd.model_size = client->sound_model.size;
 	/* read updated mem_map_handle by q6lsm_mmapcallback */
 	rmb();
-	cmd.mem_map_handle = sm->mem_map_handle;
+	cmd.mem_map_handle = client->sound_model.mem_map_handle;
 
 	pr_debug("%s: addr %pK, size %d, handle 0x%x\n", __func__,
-		&sm->phys, cmd.model_size, cmd.mem_map_handle);
+		&client->sound_model.phys, cmd.model_size, cmd.mem_map_handle);
 	rc = q6lsm_apr_send_pkt(client, client->apr, &cmd, true, NULL);
 	if (rc)
 		pr_err("%s: Failed cmd op[0x%x]rc[%d]\n", __func__,
@@ -1427,30 +1098,11 @@ int q6lsm_register_sound_model(struct lsm_client *client,
 
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_register_sound_model);
 
-/**
- * q6lsm_deregister_sound_model -
- *       De-register LSM snd model
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_deregister_sound_model(struct lsm_client *client)
 {
 	int rc;
 	struct lsm_cmd_reg_snd_model cmd;
-	/*
-	 * With multi-stage support sm buff allocation/free usage param info
-	 * to check stage index for which this sound model is being set, and
-	 * to check whether sm data is sent using set param command or not.
-	 * Hence, set param ids to '0' to indicate allocation is for legacy
-	 * reg_sm cmd, where buffer for param header need not be allocated,
-	 * also set stage index to LSM_STAGE_INDEX_FIRST.
-	 */
-	struct lsm_params_info_v2 p_info = {0};
-	p_info.stage_idx = LSM_STAGE_INDEX_FIRST;
 
 	if (!client) {
 		pr_err("APR handle NULL\n");
@@ -1478,11 +1130,10 @@ int q6lsm_deregister_sound_model(struct lsm_client *client)
 		pr_debug("%s: Deregister sound model succeeded\n", __func__);
 	}
 
-	q6lsm_snd_model_buf_free(client, &p_info);
+	q6lsm_snd_model_buf_free(client);
 
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_deregister_sound_model);
 
 static void q6lsm_add_mmaphdr(struct lsm_client *client, struct apr_hdr *hdr,
 			      u32 pkt_size, u32 cmd_flg, u32 token)
@@ -1578,163 +1229,13 @@ static int q6lsm_memory_unmap_regions(struct lsm_client *client,
 }
 
 static int q6lsm_send_cal(struct lsm_client *client,
-			u32 set_params_opcode, struct lsm_params_info_v2 *p_info)
-{
-	int rc = 0, stage_idx = p_info->stage_idx;
-	struct mem_mapping_hdr mem_hdr;
-	dma_addr_t lsm_cal_phy_addr;
-
-	memset(&mem_hdr, 0, sizeof(mem_hdr));
-
-	pr_debug("%s: Session id %d\n", __func__, client->session);
-	if (CHECK_SESSION(client->session)) {
-		pr_err("%s: session[%d]", __func__, client->session);
-		return -EINVAL;
-	}
-
-	lsm_cal_phy_addr = client->stage_cfg[stage_idx].cal_info.phys;
-	if (lsm_cal_phy_addr != 0) {
-		lsm_common.common_client[client->session].session = client->session;
-		mem_hdr.data_payload_addr_lsw = lower_32_bits(lsm_cal_phy_addr);
-		mem_hdr.data_payload_addr_msw =
-			msm_audio_populate_upper_32_bits(lsm_cal_phy_addr);
-		mem_hdr.mem_map_handle =
-			client->stage_cfg[stage_idx].cal_info.mem_map_handle;
-
-		rc = q6lsm_set_params(client, &mem_hdr, NULL,
-				client->stage_cfg[stage_idx].cal_info.size, set_params_opcode);
-		if (rc)
-			pr_err("%s: Failed set_params, rc %d\n", __func__, rc);
-	}
-
-	return rc;
-}
-
-static int q6lsm_snd_cal_free(struct lsm_client *client,
-			struct lsm_params_info_v2 *p_info)
-{
-	int rc = 0, stage_idx = p_info->stage_idx;
-	struct lsm_cal_data_info *cal = NULL;
-
-	if (!client->stage_cfg[stage_idx].cal_info.data)
-		return 0;
-
-	mutex_lock(&client->cmd_lock);
-	cal = &client->stage_cfg[stage_idx].cal_info;
-	if (cal->mem_map_handle != 0) {
-		rc = q6lsm_memory_unmap_regions(client, cal->mem_map_handle);
-		if (rc)
-			pr_err("%s: CMD Memory_unmap_regions failed %d\n",
-					__func__, rc);
-		cal->mem_map_handle = 0;
-	}
-	msm_audio_ion_free(cal->dma_buf);
-	cal->dma_buf = NULL;
-	cal->data = NULL;
-	cal->phys = 0;
-	mutex_unlock(&client->cmd_lock);
-
-	return rc;
-}
-
-static int q6lsm_snd_cal_alloc(struct lsm_client *client,
-			struct lsm_params_info_v2 *p_info)
+			  u32 set_params_opcode)
 {
 	int rc = 0;
-	size_t len = 0, total_mem = 0;
-	struct lsm_cal_data_info *cal = NULL;
+	struct lsm_cmd_set_params params;
+	struct lsm_set_params_hdr *params_hdr = &params.param_hdr;
+	struct apr_hdr *msg_hdr = &params.msg_hdr;
 	struct cal_block_data *cal_block = NULL;
-	struct audio_cal_info_lsm *lsm_cal_info = NULL;
-	struct list_head *ptr = NULL;
-	int app_type, stage_idx = p_info->stage_idx;
-	bool cal_block_found = false;
-
-	app_type = client->stage_cfg[stage_idx].app_type;
-	pr_debug("%s: app_type %d, stage_idx %d\n",
-			__func__, app_type, stage_idx);
-
-	mutex_lock(&client->cmd_lock);
-	mutex_lock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
-	list_for_each(ptr, &lsm_common.cal_data[LSM_CAL_IDX]->cal_blocks) {
-		cal_block = list_entry(ptr, struct cal_block_data, list);
-		lsm_cal_info = (struct audio_cal_info_lsm *)
-						(cal_block) ? cal_block->cal_info : NULL;
-		if ((cal_block && cal_block->cal_data.paddr) &&
-			(lsm_cal_info != NULL) &&
-			(app_type == 0 || app_type == lsm_cal_info->app_type)) {
-			cal_block_found = true;
-			len = cal_block->cal_data.size;
-			break;
-		}
-	}
-
-	if (!cal_block_found) {
-		pr_info("%s: cal not found for stage_idx %d\n", __func__, stage_idx);
-		goto exit;
-	}
-
-	if (!len) {
-		pr_debug("%s: cal size is 0, for stage_idx %d\n", __func__, stage_idx);
-		goto exit;
-	}
-
-	cal = &client->stage_cfg[stage_idx].cal_info;
-	if (cal->data) {
-		pr_debug("%s: cal data for stage_idx(%d) is already set \n",
-			__func__, stage_idx);
-		goto exit;
-	}
-
-	cal->size = len;
-	total_mem = PAGE_ALIGN(len);
-	pr_debug("%s: cal info data size %zd Total mem %zd, stage_idx %d\n",
-		 __func__, len, total_mem, stage_idx);
-
-	rc = msm_audio_ion_alloc(&cal->dma_buf, total_mem,
-			&cal->phys, &len, &cal->data);
-	if (rc) {
-		pr_err("%s: Audio ION alloc is failed for stage_idx %d, rc = %d\n",
-			__func__, stage_idx, rc);
-		cal->dma_buf = NULL;
-		cal->data = NULL;
-		goto exit;
-	}
-
-	memcpy(cal->data, (uint32_t *)cal_block->cal_data.kvaddr, cal->size);
-	mutex_unlock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
-	mutex_unlock(&client->cmd_lock);
-	rc = q6lsm_memory_map_regions(client, cal->phys, len, &cal->mem_map_handle);
-	if (rc) {
-		pr_err("%s: CMD Memory_map_regions failed for stage_idx %d, rc = %d\n",
-			__func__, stage_idx, rc);
-		cal->mem_map_handle = 0;
-		goto fail;
-	}
-
-	return 0;
-
-exit:
-	mutex_unlock(&client->cmd_lock);
-	mutex_unlock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
-fail:
-	q6lsm_snd_cal_free(client, p_info);
-	return rc;
-}
-
-/**
- * q6lsm_snd_model_buf_free -
- *       Free memory for LSM snd model
- *
- * @client: LSM client handle
- * @p_info: sound model param info
- *
- * Returns 0 on success or error on failure
- */
-int q6lsm_snd_model_buf_free(struct lsm_client *client,
-			struct lsm_params_info_v2 *p_info)
-{
-	int rc = 0, stage_idx = p_info->stage_idx;
-	struct lsm_sound_model *sm = NULL;
 
 	pr_debug("%s: Session id %d\n", __func__, client->session);
 	if (CHECK_SESSION(client->session)) {
@@ -1742,28 +1243,79 @@ int q6lsm_snd_model_buf_free(struct lsm_client *client,
 		return -EINVAL;
 	}
 
-	if (!client->stage_cfg[stage_idx].sound_model.data)
-		return 0;
+	if (lsm_common.cal_data[LSM_CAL_IDX] == NULL)
+		goto done;
 
-	mutex_lock(&client->cmd_lock);
-	sm = &client->stage_cfg[stage_idx].sound_model;
-	if (sm->mem_map_handle != 0) {
-		rc = q6lsm_memory_unmap_regions(client, sm->mem_map_handle);
-		if (rc)
-			pr_err("%s: CMD Memory_unmap_regions failed %d\n",
-				__func__, rc);
-		sm->mem_map_handle = 0;
+	mutex_lock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
+	cal_block = cal_utils_get_only_cal_block(
+		lsm_common.cal_data[LSM_CAL_IDX]);
+
+	if (!cal_block || cal_block->cal_data.size <= 0) {
+		pr_debug("%s: No cal to send!\n", __func__);
+		goto unlock;
 	}
-	msm_audio_ion_free(sm->dma_buf);
-	sm->dma_buf = NULL;
-	sm->data = NULL;
-	sm->phys = 0;
-	mutex_unlock(&client->cmd_lock);
 
-	rc = q6lsm_snd_cal_free(client, p_info);
+	if (cal_block->cal_data.size != client->lsm_cal_size) {
+		pr_err("%s: Cal size %zd doesn't match lsm cal size %d\n",
+			__func__, cal_block->cal_data.size,
+			client->lsm_cal_size);
+		rc = -EINVAL;
+		goto unlock;
+	}
+	/* Cache mmap address, only map once or if new addr */
+	lsm_common.common_client[client->session].session = client->session;
+	q6lsm_add_hdr(client, msg_hdr, sizeof(params), true);
+	msg_hdr->opcode = set_params_opcode;
+	q6lsm_set_param_hdr_info(params_hdr,
+			cal_block->cal_data.size,
+			lower_32_bits(client->lsm_cal_phy_addr),
+			msm_audio_populate_upper_32_bits(
+				client->lsm_cal_phy_addr),
+			client->sound_model.mem_map_handle);
+
+	pr_debug("%s: Cal Size = %zd", __func__,
+		cal_block->cal_data.size);
+	rc = q6lsm_apr_send_pkt(client, client->apr, &params, true, NULL);
+	if (rc)
+		pr_err("%s: Failed set_params opcode 0x%x, rc %d\n",
+		       __func__, msg_hdr->opcode, rc);
+unlock:
+	mutex_unlock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
+done:
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_snd_model_buf_free);
+
+
+int q6lsm_snd_model_buf_free(struct lsm_client *client)
+{
+	int rc;
+
+	pr_debug("%s: Session id %d\n", __func__, client->session);
+	if (CHECK_SESSION(client->session)) {
+		pr_err("%s: session[%d]", __func__, client->session);
+		return -EINVAL;
+	}
+
+	mutex_lock(&client->cmd_lock);
+	rc = q6lsm_memory_unmap_regions(client,
+					client->sound_model.mem_map_handle);
+	if (rc)
+		pr_err("%s: CMD Memory_unmap_regions failed %d\n",
+			__func__, rc);
+
+	if (client->sound_model.data) {
+		msm_audio_ion_free(client->sound_model.client,
+				 client->sound_model.handle);
+		client->sound_model.client = NULL;
+		client->sound_model.handle = NULL;
+		client->sound_model.data = NULL;
+		client->sound_model.phys = 0;
+		client->lsm_cal_phy_addr = 0;
+		client->lsm_cal_size = 0;
+	}
+	mutex_unlock(&client->cmd_lock);
+	return rc;
+}
 
 static struct lsm_client *q6lsm_get_lsm_client(int session_id)
 {
@@ -1802,6 +1354,7 @@ static int q6lsm_mmapcallback(struct apr_client_data *data, void *priv)
 		apr_reset(lsm_common.apr);
 		lsm_common.apr = NULL;
 		atomic_set(&lsm_common.apr_users, 0);
+		lsm_common.common_client[sid].lsm_cal_phy_addr = 0;
 		cal_utils_clear_cal_block_q6maps(LSM_MAX_CAL_IDX,
 			lsm_common.cal_data);
 		lsm_common.set_custom_topology = 1;
@@ -1867,82 +1420,109 @@ static int q6lsm_mmapcallback(struct apr_client_data *data, void *priv)
 	return 0;
 }
 
-/**
- * q6lsm_snd_model_buf_alloc -
- *       Allocate memory for LSM snd model
- *
- * @client: LSM client handle
- * @len: size of sound model
- * @p_info: sound model param info
- *          p_info->param_id != 0 when using set param to register sound model
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_snd_model_buf_alloc(struct lsm_client *client, size_t len,
-			      struct lsm_params_info_v2 *p_info)
+			      bool allocate_module_data)
 {
-	int rc = -EINVAL, stage_idx = p_info->stage_idx;
-	size_t total_mem = 0;
-	struct lsm_sound_model *sm = NULL;
+	int rc = -EINVAL;
+	struct cal_block_data		*cal_block = NULL;
+
+	size_t pad_zero = 0, total_mem = 0;
 
 	if (!client || len <= LSM_ALIGN_BOUNDARY)
 		return rc;
 
-	pr_debug("%s:Snd Model len = %zd, stage idx %d\n",
-			__func__, len, stage_idx);
-
 	mutex_lock(&client->cmd_lock);
-	sm = &client->stage_cfg[stage_idx].sound_model;
-	if (!sm->data) {
+
+	mutex_lock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
+	cal_block = cal_utils_get_only_cal_block(
+		lsm_common.cal_data[LSM_CAL_IDX]);
+	if (cal_block == NULL)
+		goto fail;
+
+	pr_debug("%s:Snd Model len = %zd cal size %zd phys addr %pK", __func__,
+		len, cal_block->cal_data.size,
+		&cal_block->cal_data.paddr);
+	if (!cal_block->cal_data.paddr) {
+		pr_err("%s: No LSM calibration set for session", __func__);
+		rc = -EINVAL;
+		goto fail;
+	}
+	if (!client->sound_model.data) {
+
 		/*
-		 * If sound model is sent as set_param, i.e. param_id != 0,
+		 * if sound module is sent as set_param
 		 * Then memory needs to be allocated for
 		 * set_param payload as well.
 		 */
-		if (p_info->param_id != 0)
-			len += sizeof(union param_hdrs);
+		if (allocate_module_data)
+			len += sizeof(struct lsm_param_payload_common);
 
-		sm->size = len;
-		total_mem = PAGE_ALIGN(len);
-		pr_debug("%s: sm param size %zd Total mem %zd, stage_idx %d\n",
-				 __func__, len, total_mem, stage_idx);
-		rc = msm_audio_ion_alloc(&sm->dma_buf, total_mem,
-								&sm->phys, &len, &sm->data);
-		if (rc) {
-			pr_err("%s: Audio ION alloc is failed, rc = %d, stage_idx = %d\n",
-				__func__, rc, stage_idx);
+		client->sound_model.size = len;
+		pad_zero = (LSM_ALIGN_BOUNDARY -
+			    (len % LSM_ALIGN_BOUNDARY));
+		if ((len > SIZE_MAX - pad_zero) ||
+		    (len + pad_zero >
+		     SIZE_MAX - cal_block->cal_data.size)) {
+			pr_err("%s: invalid allocation size, len = %zd, pad_zero =%zd, cal_size = %zd\n",
+				__func__, len, pad_zero,
+				cal_block->cal_data.size);
+			rc = -EINVAL;
 			goto fail;
 		}
+
+		total_mem = PAGE_ALIGN(pad_zero + len +
+			cal_block->cal_data.size);
+		pr_debug("%s: Pad zeros sound model %zd Total mem %zd\n",
+				 __func__, pad_zero, total_mem);
+		rc = msm_audio_ion_alloc("lsm_client",
+				&client->sound_model.client,
+				&client->sound_model.handle,
+				total_mem,
+				&client->sound_model.phys,
+				&len,
+				&client->sound_model.data);
+		if (rc) {
+			pr_err("%s: Audio ION alloc is failed, rc = %d\n",
+				__func__, rc);
+			goto fail;
+		}
+	pr_debug("%s: Length = %zd\n", __func__, len);
+	client->lsm_cal_phy_addr = (pad_zero +
+				    client->sound_model.phys +
+				    client->sound_model.size);
+	client->lsm_cal_size = cal_block->cal_data.size;
+	memcpy((client->sound_model.data + pad_zero +
+		client->sound_model.size),
+	       (uint32_t *)cal_block->cal_data.kvaddr, client->lsm_cal_size);
+	pr_debug("%s: Copy cal start virt_addr %pK phy_addr %pK\n"
+			 "Offset cal virtual Addr %pK\n", __func__,
+			 client->sound_model.data, &client->sound_model.phys,
+			 (pad_zero + client->sound_model.data +
+			 client->sound_model.size));
 	} else {
-		pr_err("%s: sound model busy, stage_idx %d\n", __func__, stage_idx);
+		pr_err("%s: sound model busy\n", __func__);
 		rc = -EBUSY;
 		goto fail;
 	}
-
-	rc = q6lsm_memory_map_regions(client, sm->phys, len, &sm->mem_map_handle);
-	if (rc) {
-		pr_err("%s: CMD Memory_map_regions failed %d, stage_idx %d\n",
-			__func__, rc, stage_idx);
-		sm->mem_map_handle = 0;
-		goto fail;
-	}
+	mutex_unlock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
 	mutex_unlock(&client->cmd_lock);
 
-	rc = q6lsm_snd_cal_alloc(client, p_info);
+	rc = q6lsm_memory_map_regions(client, client->sound_model.phys,
+				      len,
+				      &client->sound_model.mem_map_handle);
 	if (rc) {
-		pr_err("%s: cal alloc failed %d, stage_idx %d\n",
-			__func__, rc, stage_idx);
-		goto fail_1;
+		pr_err("%s: CMD Memory_map_regions failed %d\n", __func__, rc);
+		goto exit;
 	}
-	return rc;
 
+	return 0;
 fail:
+	mutex_unlock(&lsm_common.cal_data[LSM_CAL_IDX]->lock);
 	mutex_unlock(&client->cmd_lock);
-fail_1:
-	q6lsm_snd_model_buf_free(client, p_info);
+exit:
+	q6lsm_snd_model_buf_free(client);
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_snd_model_buf_alloc);
 
 static int q6lsm_cmd(struct lsm_client *client, int opcode, bool wait)
 {
@@ -1970,83 +1550,90 @@ static int q6lsm_cmd(struct lsm_client *client, int opcode, bool wait)
 	return rc;
 }
 
-static int q6lsm_send_param_epd_thres(struct lsm_client *client, void *data,
-				      struct param_hdr_v3 *param_info)
+static int q6lsm_send_param_epd_thres(
+		struct lsm_client *client,
+		void *data, struct lsm_module_param_ids *ids)
 {
-	struct snd_lsm_ep_det_thres *ep_det_data = NULL;
-	struct lsm_param_epd_thres epd_thres;
-	int rc = 0;
-
-	memset(&epd_thres, 0, sizeof(epd_thres));
-	param_info->param_size = sizeof(epd_thres);
+	struct snd_lsm_ep_det_thres *ep_det_data;
+	struct lsm_cmd_set_epd_threshold epd_cmd;
+	struct apr_hdr *msg_hdr = &epd_cmd.msg_hdr;
+	struct lsm_set_params_hdr *param_hdr =
+			&epd_cmd.param_hdr;
+	struct lsm_param_epd_thres *epd_thres =
+			&epd_cmd.epd_thres;
+	int rc;
 
 	ep_det_data = (struct snd_lsm_ep_det_thres *) data;
-	epd_thres.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	epd_thres.epd_begin = ep_det_data->epd_begin;
-	epd_thres.epd_end = ep_det_data->epd_end;
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(epd_cmd), true);
+	msg_hdr->opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+	q6lsm_set_param_hdr_info(param_hdr,
+		sizeof(*epd_thres), 0, 0, 0);
+	q6lsm_set_param_common(&epd_thres->common, ids,
+		sizeof(*epd_thres) - sizeof(epd_thres->common),
+		LSM_SESSION_CMD_SET_PARAMS_V2);
+	epd_thres->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	epd_thres->epd_begin = ep_det_data->epd_begin;
+	epd_thres->epd_end = ep_det_data->epd_end;
 
-	rc = q6lsm_pack_and_set_params(client, param_info,
-				       (uint8_t *) &epd_thres,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&epd_cmd, true, NULL);
 	if (unlikely(rc))
-		pr_err("%s: EPD_THRESHOLD failed, rc %d\n", __func__, rc);
+		pr_err("%s: EPD_THRESHOLD failed, rc %d\n",
+			__func__, rc);
 	return rc;
 }
 
-static int q6lsm_send_param_gain(struct lsm_client *client, u16 gain,
-				 struct param_hdr_v3 *param_info)
+static int q6lsm_send_param_gain(
+		struct lsm_client *client,
+		u16 gain, struct lsm_module_param_ids *ids)
 {
-	struct lsm_param_gain lsm_gain;
-	int rc = 0;
+	struct lsm_cmd_set_gain lsm_cmd_gain;
+	struct apr_hdr *msg_hdr = &lsm_cmd_gain.msg_hdr;
+	struct lsm_param_gain *lsm_gain = &lsm_cmd_gain.lsm_gain;
+	int rc;
 
-	memset(&lsm_gain, 0, sizeof(lsm_gain));
-	param_info->param_size = sizeof(lsm_gain);
+	q6lsm_add_hdr(client, msg_hdr,
+		      sizeof(lsm_cmd_gain), true);
+	msg_hdr->opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+	q6lsm_set_param_hdr_info(&lsm_cmd_gain.param_hdr,
+			sizeof(*lsm_gain), 0, 0, 0);
+	q6lsm_set_param_common(&lsm_gain->common, ids,
+		sizeof(*lsm_gain) - sizeof(lsm_gain->common),
+		LSM_SESSION_CMD_SET_PARAMS_V2);
+	lsm_gain->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
+	lsm_gain->gain = gain;
+	lsm_gain->reserved = 0;
 
-	lsm_gain.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	lsm_gain.gain = gain;
-
-	rc = q6lsm_pack_and_set_params(client, param_info,
-				       (uint8_t *) &lsm_gain,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
+	rc = q6lsm_apr_send_pkt(client, client->apr,
+				&lsm_cmd_gain, true, NULL);
 	if (unlikely(rc))
-		pr_err("%s: LSM_GAIN CMD send failed, rc %d\n", __func__, rc);
+		pr_err("%s: LSM_GAIN CMD send failed, rc %d\n",
+			 __func__, rc);
 	return rc;
 }
 
-/**
- * q6lsm_set_one_param -
- *       command for LSM set params
- *
- * @client: LSM client handle
- * p_info: Params info
- * data: payload based on param type
- * param_type: LSM param type
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_set_one_param(struct lsm_client *client,
-	struct lsm_params_info_v2 *p_info, void *data,
+	struct lsm_params_info *p_info, void *data,
 	uint32_t param_type)
 {
-	struct param_hdr_v3 param_info;
-	int rc = 0;
+	int rc = 0, pkt_sz;
+	struct lsm_module_param_ids ids;
+	u8 *packet;
 
-	memset(&param_info, 0, sizeof(param_info));
-
+	memset(&ids, 0, sizeof(ids));
 	switch (param_type) {
 	case LSM_ENDPOINT_DETECT_THRESHOLD: {
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		rc = q6lsm_send_param_epd_thres(client, data, &param_info);
-		if (rc)
-			pr_err("%s: LSM_ENDPOINT_DETECT_THRESHOLD failed, rc %d\n",
-			       __func__, rc);
+		ids.module_id = p_info->module_id;
+		ids.param_id = p_info->param_id;
+		rc = q6lsm_send_param_epd_thres(client, data,
+						&ids);
 		break;
 	}
 
 	case LSM_OPERATION_MODE: {
 		struct snd_lsm_detect_mode *det_mode = data;
+		struct lsm_module_param_ids opmode_ids;
 
 		if (det_mode->mode == LSM_MODE_KEYWORD_ONLY_DETECTION) {
 			client->mode = 0x01;
@@ -2060,12 +1647,11 @@ int q6lsm_set_one_param(struct lsm_client *client,
 
 		client->mode |= det_mode->detect_failure << 2;
 
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
+		opmode_ids.module_id = p_info->module_id;
+		opmode_ids.param_id = p_info->param_id;
 
-		rc = q6lsm_send_param_opmode(client, &param_info,
-					     LSM_SESSION_CMD_SET_PARAMS_V2);
+		rc = q6lsm_send_param_opmode(client, &opmode_ids,
+					LSM_SESSION_CMD_SET_PARAMS_V2);
 		if (rc)
 			pr_err("%s: OPERATION_MODE failed, rc %d\n",
 				__func__, rc);
@@ -2074,10 +1660,10 @@ int q6lsm_set_one_param(struct lsm_client *client,
 
 	case LSM_GAIN: {
 		struct snd_lsm_gain *lsm_gain = (struct snd_lsm_gain *) data;
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		rc = q6lsm_send_param_gain(client, lsm_gain->gain, &param_info);
+
+		ids.module_id = p_info->module_id;
+		ids.param_id = p_info->param_id;
+		rc = q6lsm_send_param_gain(client, lsm_gain->gain, &ids);
 		if (rc)
 			pr_err("%s: LSM_GAIN command failed, rc %d\n",
 				__func__, rc);
@@ -2085,11 +1671,10 @@ int q6lsm_set_one_param(struct lsm_client *client,
 	}
 
 	case LSM_MIN_CONFIDENCE_LEVELS:
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		rc = q6lsm_send_confidence_levels(
-			client, &param_info, LSM_SESSION_CMD_SET_PARAMS_V2);
+		ids.module_id = p_info->module_id;
+		ids.param_id = p_info->param_id;
+		rc = q6lsm_send_confidence_levels(client, &ids,
+				LSM_SESSION_CMD_SET_PARAMS_V2);
 		if (rc)
 			pr_err("%s: CONFIDENCE_LEVELS cmd failed, rc %d\n",
 				 __func__, rc);
@@ -2097,12 +1682,11 @@ int q6lsm_set_one_param(struct lsm_client *client,
 	case LSM_POLLING_ENABLE: {
 		struct snd_lsm_poll_enable *lsm_poll_enable =
 				(struct snd_lsm_poll_enable *) data;
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		rc = q6lsm_send_param_polling_enable(
-			client, lsm_poll_enable->poll_en, &param_info,
-			LSM_SESSION_CMD_SET_PARAMS_V2);
+		ids.module_id = p_info->module_id;
+		ids.param_id = p_info->param_id;
+		rc = q6lsm_send_param_polling_enable(client,
+				lsm_poll_enable->poll_en, &ids,
+				LSM_SESSION_CMD_SET_PARAMS_V2);
 		if (rc)
 			pr_err("%s: POLLING ENABLE cmd failed, rc %d\n",
 				 __func__, rc);
@@ -2110,37 +1694,31 @@ int q6lsm_set_one_param(struct lsm_client *client,
 	}
 
 	case LSM_REG_SND_MODEL: {
-		struct mem_mapping_hdr mem_hdr;
+		struct lsm_cmd_set_params model_param;
 		u32 payload_size;
-		struct lsm_sound_model *sm = NULL;
 
-		memset(&mem_hdr, 0, sizeof(mem_hdr));
+		memset(&model_param, 0, sizeof(model_param));
+		q6lsm_add_hdr(client, &model_param.msg_hdr,
+			      sizeof(model_param), true);
+		model_param.msg_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+		payload_size = p_info->param_size +
+			       sizeof(struct lsm_param_payload_common);
+		q6lsm_set_param_hdr_info(&model_param.param_hdr,
+				payload_size,
+				lower_32_bits(client->sound_model.phys),
+				msm_audio_populate_upper_32_bits(
+					client->sound_model.phys),
+				client->sound_model.mem_map_handle);
 
-		if (q6common_is_instance_id_supported())
-			payload_size = p_info->param_size +
-				       sizeof(struct param_hdr_v3);
-		else
-			payload_size = p_info->param_size +
-				       sizeof(struct param_hdr_v2);
-
-		sm = &client->stage_cfg[p_info->stage_idx].sound_model;
-
-		mem_hdr.data_payload_addr_lsw =
-			lower_32_bits(sm->phys);
-		mem_hdr.data_payload_addr_msw =
-			msm_audio_populate_upper_32_bits(
-				sm->phys),
-		mem_hdr.mem_map_handle = sm->mem_map_handle;
-
-		rc = q6lsm_set_params(client, &mem_hdr, NULL, payload_size,
-				      LSM_SESSION_CMD_SET_PARAMS_V2);
+		rc = q6lsm_apr_send_pkt(client, client->apr,
+					&model_param, true, NULL);
 		if (rc) {
 			pr_err("%s: REG_SND_MODEL failed, rc %d\n",
 				__func__, rc);
 			return rc;
 		}
 
-		rc = q6lsm_send_cal(client, LSM_SESSION_CMD_SET_PARAMS, p_info);
+		rc = q6lsm_send_cal(client, LSM_SESSION_CMD_SET_PARAMS);
 		if (rc)
 			pr_err("%s: Failed to send lsm cal, err = %d\n",
 				__func__, rc);
@@ -2148,61 +1726,71 @@ int q6lsm_set_one_param(struct lsm_client *client,
 	}
 
 	case LSM_DEREG_SND_MODEL: {
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		param_info.param_size = 0;
-		rc = q6lsm_pack_and_set_params(client, &param_info, NULL,
-					       LSM_SESSION_CMD_SET_PARAMS_V2);
+		struct lsm_param_payload_common *common;
+		struct lsm_cmd_set_params *param;
+
+		pkt_sz = sizeof(*param) + sizeof(*common);
+		packet = kzalloc(pkt_sz, GFP_KERNEL);
+		if (!packet) {
+			pr_err("%s: No memory for DEREG_SND_MODEL pkt, size = %d\n",
+				__func__, pkt_sz);
+			return -ENOMEM;
+		}
+
+		param = (struct lsm_cmd_set_params *) packet;
+		common = (struct lsm_param_payload_common *)
+				(packet + sizeof(*param));
+		q6lsm_add_hdr(client, &param->msg_hdr, pkt_sz, true);
+		param->msg_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+		q6lsm_set_param_hdr_info(&param->param_hdr,
+					 sizeof(*common),
+					 0, 0, 0);
+		ids.module_id = p_info->module_id;
+		ids.param_id = p_info->param_id;
+		q6lsm_set_param_common(common, &ids, 0,
+				       LSM_SESSION_CMD_SET_PARAMS_V2);
+		rc = q6lsm_apr_send_pkt(client, client->apr,
+					packet, true, NULL);
 		if (rc)
 			pr_err("%s: DEREG_SND_MODEL failed, rc %d\n",
 				__func__, rc);
+		kfree(packet);
 		break;
 	}
 
 	case LSM_CUSTOM_PARAMS: {
-		u32 param_size = p_info->param_size;
+		struct apr_hdr *hdr;
+		u8 *custom_data;
 
-		/* Check minimum size, V2 structure is smaller than V3 */
-		if (param_size < sizeof(struct param_hdr_v2)) {
-			pr_err("%s: Invalid param_size %d\n", __func__,
-			       param_size);
+		if (p_info->param_size <
+		    sizeof(struct lsm_param_payload_common)) {
+			pr_err("%s: Invalid param_size %d\n",
+				__func__, p_info->param_size);
 			return -EINVAL;
 		}
 
-		rc = q6lsm_set_params(client, NULL, data, param_size,
-				      LSM_SESSION_CMD_SET_PARAMS_V2);
+		pkt_sz = p_info->param_size + sizeof(*hdr);
+		packet = kzalloc(pkt_sz, GFP_KERNEL);
+		if (!packet) {
+			pr_err("%s: no memory for CUSTOM_PARAMS, size = %d\n",
+				__func__, pkt_sz);
+			return -ENOMEM;
+		}
+
+		hdr = (struct apr_hdr *) packet;
+		custom_data = (u8 *) (packet + sizeof(*hdr));
+		q6lsm_add_hdr(client, hdr, pkt_sz, true);
+		hdr->opcode = LSM_SESSION_CMD_SET_PARAMS_V2;
+		memcpy(custom_data, data, p_info->param_size);
+
+		rc = q6lsm_apr_send_pkt(client, client->apr,
+					packet, true, NULL);
 		if (rc)
 			pr_err("%s: CUSTOM_PARAMS failed, rc %d\n",
 				__func__, rc);
+		kfree(packet);
 		break;
 	}
-
-	case LSM_DET_EVENT_TYPE: {
-		struct lsm_param_det_event_type det_event_type;
-		struct snd_lsm_det_event_type *det_event_data =
-					(struct snd_lsm_det_event_type *)data;
-
-		param_info.module_id = p_info->module_id;
-		param_info.instance_id = p_info->instance_id;
-		param_info.param_id = p_info->param_id;
-		param_info.param_size = sizeof(det_event_type);
-
-		memset(&det_event_type, 0, sizeof(det_event_type));
-
-		det_event_type.minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-		det_event_type.event_type = det_event_data->event_type;
-		det_event_type.mode = det_event_data->mode;
-
-		rc = q6lsm_pack_and_set_params(client, &param_info,
-					       (uint8_t *)&det_event_type,
-					       LSM_SESSION_CMD_SET_PARAMS_V2);
-		if (rc)
-			pr_err("%s: DET_EVENT_TYPE cmd failed, rc %d\n",
-				 __func__, rc);
-		break;
-	}
-
 	default:
 		pr_err("%s: wrong param_type 0x%x\n",
 			__func__, p_info->param_type);
@@ -2210,186 +1798,85 @@ int q6lsm_set_one_param(struct lsm_client *client,
 
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_set_one_param);
 
 
-/**
- * q6lsm_start -
- *       command for LSM start
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_start(struct lsm_client *client, bool wait)
 {
 	return q6lsm_cmd(client, LSM_SESSION_CMD_START, wait);
 }
-EXPORT_SYMBOL(q6lsm_start);
 
-/**
- * q6lsm_stop -
- *       command for LSM stop
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_stop(struct lsm_client *client, bool wait)
 {
 	return q6lsm_cmd(client, LSM_SESSION_CMD_STOP, wait);
 }
-EXPORT_SYMBOL(q6lsm_stop);
 
-/**
- * q6lsm_close -
- *       command for LSM close
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_close(struct lsm_client *client)
 {
 	return q6lsm_cmd(client, LSM_SESSION_CMD_CLOSE_TX, true);
 }
-EXPORT_SYMBOL(q6lsm_close);
 
-/**
- * q6lsm_lab_control -
- *       command to set LSM LAB control params
- *
- * @client: LSM client handle
- * @enable: bool flag  to enable or disable LAB on DSP
- * @p_info: param info to be used for sending lab control param
- *
- * Returns 0 on success or error on failure
- */
-int q6lsm_lab_control(struct lsm_client *client, u32 enable,
-		struct lsm_params_info_v2 *p_info)
+int q6lsm_lab_control(struct lsm_client *client, u32 enable)
 {
-	struct lsm_param_lab_enable lab_enable;
-	struct param_hdr_v3 lab_enable_hdr;
-	struct lsm_param_lab_config lab_config;
-	struct param_hdr_v3 lab_config_hdr;
 	int rc = 0;
-
-	memset(&lab_enable, 0, sizeof(lab_enable));
-	memset(&lab_enable_hdr, 0, sizeof(lab_enable_hdr));
-	memset(&lab_config, 0, sizeof(lab_config));
-	memset(&lab_config_hdr, 0, sizeof(lab_config_hdr));
+	struct lsm_params_lab_enable lab_enable;
+	struct lsm_params_lab_config lab_config;
+	struct lsm_module_param_ids lab_ids;
+	u32 param_size;
 
 	if (!client) {
 		pr_err("%s: invalid param client %pK\n", __func__, client);
 		return -EINVAL;
 	}
-
 	/* enable/disable lab on dsp */
-	lab_enable_hdr.module_id = p_info->module_id;
-	lab_enable_hdr.instance_id = p_info->instance_id;
-	lab_enable_hdr.param_id = LSM_PARAM_ID_LAB_ENABLE;
-	lab_enable_hdr.param_size = sizeof(lab_enable);
-	lab_enable.enable = (enable) ? 1 : 0;
-	rc = q6lsm_pack_and_set_params(client, &lab_enable_hdr,
-				       (uint8_t *) &lab_enable,
-				       LSM_SESSION_CMD_SET_PARAMS);
+	q6lsm_add_hdr(client, &lab_enable.msg_hdr, sizeof(lab_enable), true);
+	lab_enable.msg_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS;
+	q6lsm_set_param_hdr_info(&lab_enable.params_hdr,
+				 sizeof(struct lsm_lab_enable),
+				 0, 0, 0);
+	param_size = (sizeof(struct lsm_lab_enable) -
+		      sizeof(struct lsm_param_payload_common));
+	lab_ids.module_id = LSM_MODULE_ID_LAB;
+	lab_ids.param_id = LSM_PARAM_ID_LAB_ENABLE;
+	q6lsm_set_param_common(&lab_enable.lab_enable.common,
+				&lab_ids, param_size,
+				LSM_SESSION_CMD_SET_PARAMS);
+	lab_enable.lab_enable.enable = (enable) ? 1 : 0;
+	rc = q6lsm_apr_send_pkt(client, client->apr, &lab_enable, true, NULL);
 	if (rc) {
 		pr_err("%s: Lab enable failed rc %d\n", __func__, rc);
 		return rc;
 	}
 	if (!enable)
 		goto exit;
-
 	/* lab session is being enabled set the config values */
-	lab_config_hdr.module_id = p_info->module_id;
-	lab_config_hdr.instance_id = p_info->instance_id;
-	lab_config_hdr.param_id = LSM_PARAM_ID_LAB_CONFIG;
-	lab_config_hdr.param_size = sizeof(lab_config);
-	lab_config.minor_version = 1;
-	lab_config.wake_up_latency_ms = 250;
-	rc = q6lsm_pack_and_set_params(client, &lab_config_hdr,
-				       (uint8_t *) &lab_config,
-				       LSM_SESSION_CMD_SET_PARAMS);
+	q6lsm_add_hdr(client, &lab_config.msg_hdr, sizeof(lab_config), true);
+	lab_config.msg_hdr.opcode = LSM_SESSION_CMD_SET_PARAMS;
+	q6lsm_set_param_hdr_info(&lab_config.params_hdr,
+				 sizeof(struct lsm_lab_config),
+				 0, 0, 0);
+	lab_ids.module_id = LSM_MODULE_ID_LAB;
+	lab_ids.param_id = LSM_PARAM_ID_LAB_CONFIG;
+	param_size = (sizeof(struct lsm_lab_config) -
+		      sizeof(struct lsm_param_payload_common));
+	q6lsm_set_param_common(&lab_config.lab_config.common,
+			       &lab_ids, param_size,
+			       LSM_SESSION_CMD_SET_PARAMS);
+	lab_config.lab_config.minor_version = 1;
+	lab_config.lab_config.wake_up_latency_ms = 250;
+	rc = q6lsm_apr_send_pkt(client, client->apr, &lab_config, true, NULL);
 	if (rc) {
 		pr_err("%s: Lab config failed rc %d disable lab\n",
 		 __func__, rc);
 		/* Lab config failed disable lab */
-		lab_enable.enable = 0;
-		if (q6lsm_pack_and_set_params(client, &lab_enable_hdr,
-					      (uint8_t *) &lab_enable,
-					      LSM_SESSION_CMD_SET_PARAMS))
+		lab_enable.lab_enable.enable = 0;
+		if (q6lsm_apr_send_pkt(client, client->apr,
+			&lab_enable, true, NULL))
 			pr_err("%s: Lab disable failed\n", __func__);
 	}
 exit:
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_lab_control);
 
-/*
- * q6lsm_lab_out_ch_cfg -
- *	Command to set the channel configuration
- *	for look-ahead buffer.
- *
- * @client: LSM client handle
- * @ch_map: Channel map indicating the order
- *	    of channels to be configured.
- * @p_info: param info to be used for sending lab config param
- *
- * Returns 0 on success or error on failure
- */
-int q6lsm_lab_out_ch_cfg(struct lsm_client *client,
-			 u8 *ch_map, struct lsm_params_info_v2 *p_info)
-{
-	u8 *param_buf;
-	struct lsm_param_lab_out_ch_cfg *lab_out_cfg;
-	struct param_hdr_v3 lab_out_cfg_hdr;
-	struct lsm_hw_params *out_params = &client->out_hw_params;
-	int i, rc = 0, param_len = 0;
-
-	param_len = sizeof(*lab_out_cfg) +
-		    sizeof(u8) * out_params->num_chs;
-
-	if (param_len % 4)
-		param_len += (4 - (param_len % 4));
-
-	param_buf = kzalloc(param_len, GFP_KERNEL);
-	if (!param_buf)
-		return -ENOMEM;
-
-	lab_out_cfg = (struct lsm_param_lab_out_ch_cfg *) param_buf;
-	lab_out_cfg->minor_version = QLSM_PARAM_ID_MINOR_VERSION;
-	lab_out_cfg->num_channels = out_params->num_chs;
-
-	for (i = 0; i < out_params->num_chs; i++)
-		lab_out_cfg->channel_indices[i] = ch_map[i];
-
-	memset(&lab_out_cfg_hdr, 0, sizeof(lab_out_cfg_hdr));
-	lab_out_cfg_hdr.module_id = p_info->module_id;
-	lab_out_cfg_hdr.instance_id = p_info->instance_id;
-	lab_out_cfg_hdr.param_id = LSM_PARAM_ID_LAB_OUTPUT_CHANNEL_CONFIG;
-	lab_out_cfg_hdr.param_size = param_len;
-
-	rc = q6lsm_pack_and_set_params(client, &lab_out_cfg_hdr,
-				       param_buf,
-				       LSM_SESSION_CMD_SET_PARAMS_V2);
-	if (rc)
-		pr_err("%s: Lab out channel config failed %d\n",
-			__func__, rc);
-
-	kfree(param_buf);
-
-	return rc;
-}
-EXPORT_SYMBOL(q6lsm_lab_out_ch_cfg);
-
-/**
- * q6lsm_stop_lab -
- *       command to stop LSM LAB
- *
- * @client: LSM client handle
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_stop_lab(struct lsm_client *client)
 {
 	int rc = 0;
@@ -2403,17 +1890,7 @@ int q6lsm_stop_lab(struct lsm_client *client)
 		pr_err("%s: Lab stop failed %d\n", __func__, rc);
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_stop_lab);
 
-/**
- * q6lsm_read -
- *       command for LSM read
- *
- * @client: LSM client handle
- * @lsm_cmd_read: LSM read command
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_read(struct lsm_client *client, struct lsm_cmd_read *read)
 {
 	int rc = 0;
@@ -2433,22 +1910,11 @@ int q6lsm_read(struct lsm_client *client, struct lsm_cmd_read *read)
 		pr_err("%s: read buffer call failed rc %d\n", __func__, rc);
 	return rc;
 }
-EXPORT_SYMBOL(q6lsm_read);
 
-/**
- * q6lsm_lab_buffer_alloc -
- *       Lab buffer allocation or de-alloc
- *
- * @client: LSM client handle
- * @alloc: Allocate or free ion memory
- *
- * Returns 0 on success or error on failure
- */
 int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 {
 	int ret = 0, i = 0;
 	size_t allocate_size = 0, len = 0;
-	struct lsm_hw_params *out_params = &client->out_hw_params;
 
 	if (!client) {
 		pr_err("%s: invalid client\n", __func__);
@@ -2458,23 +1924,25 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 		if (client->lab_buffer) {
 			pr_err("%s: buffers are allocated period count %d period size %d\n",
 				__func__,
-				out_params->period_count,
-				out_params->buf_sz);
+				client->hw_params.period_count,
+				client->hw_params.buf_sz);
 			return -EINVAL;
 		}
-		allocate_size = out_params->period_count *
-				out_params->buf_sz;
+		allocate_size = client->hw_params.period_count *
+				client->hw_params.buf_sz;
 		allocate_size = PAGE_ALIGN(allocate_size);
 		client->lab_buffer =
 			kzalloc(sizeof(struct lsm_lab_buffer) *
-			out_params->period_count, GFP_KERNEL);
+			client->hw_params.period_count, GFP_KERNEL);
 		if (!client->lab_buffer) {
 			pr_err("%s: memory allocation for lab buffer failed count %d\n"
 				, __func__,
-				out_params->period_count);
+				client->hw_params.period_count);
 			return -ENOMEM;
 		}
-		ret = msm_audio_ion_alloc(&client->lab_buffer[0].dma_buf,
+		ret = msm_audio_ion_alloc("lsm_lab",
+			&client->lab_buffer[0].client,
+			&client->lab_buffer[0].handle,
 			allocate_size, &client->lab_buffer[0].phys,
 			&len,
 			&client->lab_buffer[0].data);
@@ -2489,7 +1957,8 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 				pr_err("%s: memory map filed ret %d size %zd\n",
 					__func__, ret, len);
 				msm_audio_ion_free(
-				client->lab_buffer[0].dma_buf);
+				client->lab_buffer[0].client,
+				client->lab_buffer[0].handle);
 			}
 		}
 		if (ret) {
@@ -2502,17 +1971,16 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 				__func__,
 				client->lab_buffer[0].mem_map_handle,
 				&client->lab_buffer[0].phys,
-				out_params->buf_sz);
-
-			for (i = 0; i < out_params->period_count; i++) {
+				client->hw_params.buf_sz);
+			for (i = 0; i < client->hw_params.period_count; i++) {
 				client->lab_buffer[i].phys =
 				client->lab_buffer[0].phys +
-				(i * out_params->buf_sz);
+				(i * client->hw_params.buf_sz);
 				client->lab_buffer[i].size =
-				out_params->buf_sz;
+				client->hw_params.buf_sz;
 				client->lab_buffer[i].data =
 				(u8 *)(client->lab_buffer[0].data) +
-				(i * out_params->buf_sz);
+				(i * client->hw_params.buf_sz);
 				client->lab_buffer[i].mem_map_handle =
 				client->lab_buffer[0].mem_map_handle;
 			}
@@ -2521,7 +1989,9 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 		ret = q6lsm_memory_unmap_regions(client,
 			client->lab_buffer[0].mem_map_handle);
 		if (!ret)
-			msm_audio_ion_free(client->lab_buffer[0].dma_buf);
+			msm_audio_ion_free(
+			client->lab_buffer[0].client,
+			client->lab_buffer[0].handle);
 		else
 			pr_err("%s: unmap failed not freeing memory\n",
 			__func__);
@@ -2530,7 +2000,6 @@ int q6lsm_lab_buffer_alloc(struct lsm_client *client, bool alloc)
 	}
 	return ret;
 }
-EXPORT_SYMBOL(q6lsm_lab_buffer_alloc);
 
 static int get_cal_type_index(int32_t cal_type)
 {
@@ -2686,13 +2155,11 @@ err:
 	return ret;
 }
 
-int __init q6lsm_init(void)
+static int __init q6lsm_init(void)
 {
 	int i = 0;
 
 	pr_debug("%s:\n", __func__);
-
-	memset(&lsm_common, 0, sizeof(lsm_common));
 	spin_lock_init(&lsm_session_lock);
 	spin_lock_init(&mmap_lock);
 	mutex_init(&lsm_common.apr_lock);
@@ -2710,7 +2177,10 @@ int __init q6lsm_init(void)
 	return 0;
 }
 
-void q6lsm_exit(void)
+static void __exit q6lsm_exit(void)
 {
 	lsm_delete_cal_data();
 }
+
+device_initcall(q6lsm_init);
+__exitcall(q6lsm_exit);

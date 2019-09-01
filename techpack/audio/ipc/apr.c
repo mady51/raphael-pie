@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2014, 2016-2019 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2014, 2016-2018 The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -31,7 +31,6 @@
 #include <linux/of_platform.h>
 #include <soc/qcom/subsystem_restart.h>
 #include <soc/qcom/scm.h>
-#include <soc/snd_event.h>
 #include <dsp/apr_audio-v2.h>
 #include <dsp/audio_notifier.h>
 #include <ipc/apr.h>
@@ -42,9 +41,9 @@
 static struct apr_q6 q6;
 static struct apr_client client[APR_DEST_MAX][APR_CLIENT_MAX];
 static void *apr_pkt_ctx;
+static wait_queue_head_t dsp_wait;
 static wait_queue_head_t modem_wait;
 static bool is_modem_up;
-static char *subsys_name = NULL;
 /* Subsystem restart: QDSP6 data, functions */
 static struct workqueue_struct *apr_reset_workqueue;
 static void apr_reset_deregister(struct work_struct *work);
@@ -222,29 +221,15 @@ static struct apr_svc_table svc_tbl_voice[] = {
 	},
 };
 
-/**
- * apr_get_modem_state:
- *
- * Returns current modem load status
- *
- */
 enum apr_subsys_state apr_get_modem_state(void)
 {
 	return atomic_read(&q6.modem_state);
 }
-EXPORT_SYMBOL(apr_get_modem_state);
 
-/**
- * apr_set_modem_state - Update modem load status.
- *
- * @state: State to update modem load status
- *
- */
 void apr_set_modem_state(enum apr_subsys_state state)
 {
 	atomic_set(&q6.modem_state, state);
 }
-EXPORT_SYMBOL(apr_set_modem_state);
 
 enum apr_subsys_state apr_cmpxchg_modem_state(enum apr_subsys_state prev,
 					      enum apr_subsys_state new)
@@ -282,19 +267,15 @@ int apr_set_q6_state(enum apr_subsys_state state)
 }
 EXPORT_SYMBOL(apr_set_q6_state);
 
-static void apr_ssr_disable(struct device *dev, void *data)
+enum apr_subsys_state apr_cmpxchg_q6_state(enum apr_subsys_state prev,
+					   enum apr_subsys_state new)
 {
-	apr_set_q6_state(APR_SUBSYS_DOWN);
+	return atomic_cmpxchg(&q6.q6_state, prev, new);
 }
-
-static const struct snd_event_ops apr_ssr_ops = {
-	.disable = apr_ssr_disable,
-};
 
 static void apr_adsp_down(unsigned long opcode)
 {
-	pr_info("%s: Q6 is Down\n", __func__);
-	snd_event_notify(apr_priv->dev, SND_EVENT_DOWN);
+	pr_debug("%s: Q6 is Down\n", __func__);
 	apr_set_q6_state(APR_SUBSYS_DOWN);
 	dispatch_event(opcode, APR_DEST_QDSP6);
 }
@@ -305,21 +286,40 @@ static void apr_add_child_devices(struct work_struct *work)
 
 	ret = of_platform_populate(apr_priv->dev->of_node,
 			NULL, NULL, apr_priv->dev);
-	if (ret)
-		dev_err(apr_priv->dev, "%s: failed to add child nodes, ret=%d\n",
-			__func__, ret);
+	 if (ret)
+		dev_dbg(apr_priv->dev, "%s: failed to add child nodes, ret=%d\n",
+			 __func__, ret);
 }
 
 static void apr_adsp_up(void)
 {
-	pr_info("%s: Q6 is Up\n", __func__);
-	apr_set_q6_state(APR_SUBSYS_LOADED);
+	pr_debug("%s: Q6 is Up\n", __func__);
+	if (apr_cmpxchg_q6_state(APR_SUBSYS_DOWN, APR_SUBSYS_LOADED) ==
+							APR_SUBSYS_DOWN)
+		wake_up(&dsp_wait);
 
 	spin_lock(&apr_priv->apr_lock);
 	if (apr_priv->is_initial_boot)
 		schedule_work(&apr_priv->add_chld_dev_work);
 	spin_unlock(&apr_priv->apr_lock);
-	snd_event_notify(apr_priv->dev, SND_EVENT_UP);
+}
+
+int apr_wait_for_device_up(int dest_id)
+{
+	int rc = -1;
+
+	if (dest_id == APR_DEST_MODEM)
+		rc = wait_event_interruptible_timeout(modem_wait,
+				    (apr_get_modem_state() == APR_SUBSYS_UP),
+				    (1 * HZ));
+	else if (dest_id == APR_DEST_QDSP6)
+		rc = wait_event_interruptible_timeout(dsp_wait,
+				    (apr_get_q6_state() == APR_SUBSYS_UP),
+				    (1 * HZ));
+	else
+		pr_err("%s: unknown dest_id %d\n", __func__, dest_id);
+	/* returns left time */
+	return rc;
 }
 
 int apr_load_adsp_image(void)
@@ -350,15 +350,6 @@ struct apr_client *apr_get_client(int dest_id, int client_id)
 	return &client[dest_id][client_id];
 }
 
-/**
- * apr_send_pkt - Clients call to send packet
- * to destination processor.
- *
- * @handle: APR service handle
- * @buf: payload to send to destination processor.
- *
- * Returns Bytes(>0)pkt_size on success or error on failure.
- */
 int apr_send_pkt(void *handle, uint32_t *buf)
 {
 	struct apr_svc *svc = handle;
@@ -381,7 +372,7 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 
 	if ((svc->dest_id == APR_DEST_QDSP6) &&
 	    (apr_get_q6_state() != APR_SUBSYS_LOADED)) {
-		pr_err_ratelimited("%s: Still dsp is not Up\n", __func__);
+		pr_err("%s: Still dsp is not Up\n", __func__);
 		return -ENETRESET;
 	} else if ((svc->dest_id == APR_DEST_MODEM) &&
 		   (apr_get_modem_state() == APR_SUBSYS_DOWN)) {
@@ -395,7 +386,7 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 	clnt = &client[dest_id][client_id];
 
 	if (!client[dest_id][client_id].handle) {
-		pr_err_ratelimited("APR: Still service is not yet opened\n");
+		pr_err("APR: Still service is not yet opened\n");
 		spin_unlock_irqrestore(&svc->w_lock, flags);
 		return -EINVAL;
 	}
@@ -432,7 +423,6 @@ int apr_send_pkt(void *handle, uint32_t *buf)
 
 	return rc;
 }
-EXPORT_SYMBOL(apr_send_pkt);
 
 int apr_pkt_config(void *handle, struct apr_pkt_cfg *cfg)
 {
@@ -460,19 +450,6 @@ int apr_pkt_config(void *handle, struct apr_pkt_cfg *cfg)
 		cfg->intents.num_of_intents, cfg->intents.size);
 }
 
-/**
- * apr_register - Clients call to register
- * to APR.
- *
- * @dest: destination processor
- * @svc_name: name of service to register as
- * @svc_fn: callback function to trigger when response
- *   ack or packets received from destination processor.
- * @src_port: Port number within a service
- * @priv: private data of client, passed back in cb fn.
- *
- * Returns apr_svc handle on success or NULL on failure.
- */
 struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 				uint32_t src_port, void *priv)
 {
@@ -508,7 +485,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 
 	if (dest_id == APR_DEST_QDSP6) {
 		if (apr_get_q6_state() != APR_SUBSYS_LOADED) {
-			pr_err_ratelimited("%s: adsp not up\n", __func__);
+			pr_err("%s: adsp not up\n", __func__);
 			return NULL;
 		}
 		pr_debug("%s: adsp Up\n", __func__);
@@ -520,9 +497,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 				return NULL;
 			}
 			pr_debug("%s: Wait for modem to bootup\n", __func__);
-			rc = wait_event_interruptible_timeout(modem_wait,
-						(apr_get_modem_state() == APR_SUBSYS_UP),
-						(1 * HZ));
+			rc = apr_wait_for_device_up(APR_DEST_MODEM);
 			if (rc == 0) {
 				pr_err("%s: Modem is not Up\n", __func__);
 				return NULL;
@@ -532,7 +507,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 	}
 
 	if (apr_get_svc(svc_name, domain_id, &client_id, &svc_idx, &svc_id)) {
-		pr_err_ratelimited("%s: apr_get_svc failed\n", __func__);
+		pr_err("%s: apr_get_svc failed\n", __func__);
 		goto done;
 	}
 
@@ -543,7 +518,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 				APR_DL_SMD, apr_cb_func, NULL);
 		if (!clnt->handle) {
 			svc = NULL;
-			pr_err_ratelimited("APR: Unable to open handle\n");
+			pr_err("APR: Unable to open handle\n");
 			mutex_unlock(&clnt->m_lock);
 			goto done;
 		}
@@ -554,8 +529,7 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 	clnt->id = client_id;
 	if (svc->need_reset) {
 		mutex_unlock(&svc->m_lock);
-		pr_err_ratelimited("APR: Service needs reset\n");
-		svc = NULL;
+		pr_err("APR: Service needs reset\n");
 		goto done;
 	}
 	svc->id = svc_id;
@@ -592,7 +566,6 @@ struct apr_svc *apr_register(char *dest, char *svc_name, apr_fn svc_fn,
 done:
 	return svc;
 }
-EXPORT_SYMBOL(apr_register);
 
 
 void apr_cb_func(void *buf, int len, void *priv)
@@ -643,12 +616,6 @@ void apr_cb_func(void *buf, int len, void *priv)
 		pr_err("APR: Wrong paket size\n");
 		return;
 	}
-
-	if (hdr->pkt_size < hdr_size) {
-		pr_err("APR: Packet size less than header size\n");
-		return;
-	}
-
 	msg_type = hdr->hdr_field;
 	msg_type = (msg_type >> 0x08) & 0x0003;
 	if (msg_type >= APR_MSG_TYPE_MAX && msg_type != APR_BASIC_RSP_RESULT) {
@@ -801,14 +768,6 @@ static void apr_reset_deregister(struct work_struct *work)
 	kfree(apr_reset);
 }
 
-/**
- * apr_start_rx_rt - Clients call to vote for thread
- * priority upgrade whenever needed.
- *
- * @handle: APR service handle
- *
- * Returns 0 on success or error otherwise.
- */
 int apr_start_rx_rt(void *handle)
 {
 	int rc = 0;
@@ -849,17 +808,7 @@ exit:
 	mutex_unlock(&svc->m_lock);
 	return rc;
 }
-EXPORT_SYMBOL(apr_start_rx_rt);
 
-/**
- * apr_end_rx_rt - Clients call to unvote for thread
- * priority upgrade (perviously voted with
- * apr_start_rx_rt()).
- *
- * @handle: APR service handle
- *
- * Returns 0 on success or error otherwise.
- */
 int apr_end_rx_rt(void *handle)
 {
 	int rc = 0;
@@ -900,16 +849,7 @@ exit:
 	mutex_unlock(&svc->m_lock);
 	return rc;
 }
-EXPORT_SYMBOL(apr_end_rx_rt);
 
-/**
- * apr_deregister - Clients call to de-register
- * from APR.
- *
- * @handle: APR service handle to de-register
- *
- * Returns 0 on success or -EINVAL on error.
- */
 int apr_deregister(void *handle)
 {
 	struct apr_svc *svc = handle;
@@ -959,15 +899,7 @@ int apr_deregister(void *handle)
 
 	return 0;
 }
-EXPORT_SYMBOL(apr_deregister);
 
-/**
- * apr_reset - sets up workqueue to de-register
- * the given APR service handle.
- *
- * @handle: APR service handle
- *
- */
 void apr_reset(void *handle)
 {
 	struct apr_reset_work *apr_reset_worker = NULL;
@@ -993,7 +925,6 @@ void apr_reset(void *handle)
 	INIT_WORK(&apr_reset_worker->work, apr_reset_deregister);
 	queue_work(apr_reset_workqueue, &apr_reset_worker->work);
 }
-EXPORT_SYMBOL(apr_reset);
 
 /* Dispatch the Reset events to Modem and audio clients */
 static void dispatch_event(unsigned long code, uint16_t proc)
@@ -1128,7 +1059,6 @@ static void apr_cleanup(void)
 	int i, j, k;
 
 	of_platform_depopulate(apr_priv->dev);
-	subsys_notif_deregister(subsys_name);
 	if (apr_reset_workqueue) {
 		flush_workqueue(apr_reset_workqueue);
 		destroy_workqueue(apr_reset_workqueue);
@@ -1146,8 +1076,9 @@ static void apr_cleanup(void)
 
 static int apr_probe(struct platform_device *pdev)
 {
-	int i, j, k, ret = 0;
+	int i, j, k;
 
+	init_waitqueue_head(&dsp_wait);
 	init_waitqueue_head(&modem_wait);
 
 	apr_priv = devm_kzalloc(&pdev->dev, sizeof(*apr_priv), GFP_KERNEL);
@@ -1182,44 +1113,17 @@ static int apr_probe(struct platform_device *pdev)
 	spin_lock(&apr_priv->apr_lock);
 	apr_priv->is_initial_boot = true;
 	spin_unlock(&apr_priv->apr_lock);
-	ret = of_property_read_string(pdev->dev.of_node,
-				      "qcom,subsys-name",
-				      (const char **)(&subsys_name));
-	if (ret) {
-		pr_err("%s: missing subsys-name entry in dt node\n", __func__);
-		return -EINVAL;
-	}
-
-	if (!strcmp(subsys_name, "apr_adsp")) {
-		subsys_notif_register("apr_adsp",
-				       AUDIO_NOTIFIER_ADSP_DOMAIN,
-				       &adsp_service_nb);
-	} else if (!strcmp(subsys_name, "apr_modem")) {
-		subsys_notif_register("apr_modem",
-				       AUDIO_NOTIFIER_MODEM_DOMAIN,
-				       &modem_service_nb);
-	} else {
-		pr_err("%s: invalid subsys-name %s\n", __func__, subsys_name);
-		return -EINVAL;
-	}
-
-	apr_tal_init();
-
-	ret = snd_event_client_register(&pdev->dev, &apr_ssr_ops, NULL);
-	if (ret) {
-		pr_err("%s: Registration with SND event fwk failed ret = %d\n",
-			__func__, ret);
-		ret = 0;
-	}
+	subsys_notif_register("apr_adsp", AUDIO_NOTIFIER_ADSP_DOMAIN,
+			      &adsp_service_nb);
+	subsys_notif_register("apr_modem", AUDIO_NOTIFIER_MODEM_DOMAIN,
+			      &modem_service_nb);
 
 	return apr_debug_init();
 }
 
 static int apr_remove(struct platform_device *pdev)
 {
-	snd_event_client_deregister(&pdev->dev);
 	apr_cleanup();
-	apr_tal_exit();
 	apr_priv = NULL;
 	return 0;
 }

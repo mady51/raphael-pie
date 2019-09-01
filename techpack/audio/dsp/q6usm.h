@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2014, 2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2014, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -63,8 +63,10 @@ struct us_port_data {
 	/* read or write locks */
 	struct mutex	lock;
 	spinlock_t	dsp_lock;
-	/* ION dma_buf memory */
-	struct      dma_buf *dma_buf;
+	/* ION memory handle */
+	struct      ion_handle *handle;
+	/* ION memory client */
+	struct      ion_client *client;
 	/* extended parameters, related to q6 variants */
 	void		*ext;
 	/* physical address of parameter buffer */
@@ -75,8 +77,10 @@ struct us_port_data {
 	uint32_t	param_buf_size;
 	/* parameter buffer memory handle */
 	void		*param_buf_mem_handle;
-	/* ION dma_buf memory for parameter buffer */
-	struct      dma_buf *param_dma_buf;
+	/* ION memory handle for parameter buffer */
+	struct      ion_handle *param_handle;
+	/* ION memory client for parameter buffer */
+	struct      ion_client *param_client;
 };
 
 struct us_client {
@@ -122,6 +126,5 @@ int q6usm_set_us_stream_param(int dir, struct us_client *usc,
 		uint32_t module_id, uint32_t param_id, uint32_t buf_size);
 int q6usm_get_us_stream_param(int dir, struct us_client *usc,
 		uint32_t module_id, uint32_t param_id, uint32_t buf_size);
-int q6usm_init(void);
 
 #endif /* __Q6_USM_H__ */

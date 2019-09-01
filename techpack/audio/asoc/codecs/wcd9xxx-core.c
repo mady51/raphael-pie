@@ -1,4 +1,4 @@
-/* Copyright (c) 2011-2018, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2011-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -88,7 +88,6 @@ static const int wcd9xxx_cdc_types[] = {
 	[WCD9330] = WCD9330,
 	[WCD9335] = WCD9335,
 	[WCD934X] = WCD934X,
-	[WCD9360] = WCD9360,
 };
 
 static const struct of_device_id wcd9xxx_of_match[] = {
@@ -330,8 +329,7 @@ int wcd9xxx_slim_write_repeat(struct wcd9xxx *wcd9xxx, unsigned short reg,
 	struct slim_ele_access slim_msg;
 
 	mutex_lock(&wcd9xxx->io_lock);
-	if (wcd9xxx->type == WCD9335 || wcd9xxx->type == WCD934X ||
-		wcd9xxx->type == WCD9360) {
+	if (wcd9xxx->type == WCD9335 || wcd9xxx->type == WCD934X) {
 		ret = wcd9xxx_page_write(wcd9xxx, &reg);
 		if (ret)
 			goto done;
@@ -1248,7 +1246,7 @@ static int wcd9xxx_slim_probe(struct slim_device *slim)
 		goto err;
 	}
 	if (slim->dev.of_node) {
-		dev_dbg(&slim->dev, "Platform data from device tree\n");
+		dev_info(&slim->dev, "Platform data from device tree\n");
 		pdata = wcd9xxx_populate_dt_data(&slim->dev);
 		if (!pdata) {
 			dev_err(&slim->dev,
@@ -1288,9 +1286,6 @@ static int wcd9xxx_slim_probe(struct slim_device *slim)
 
 	if (pdata->has_buck_vsel_gpio)
 		msm_cdc_pinctrl_select_active_state(pdata->buck_vsel_ctl_np);
-
-	if (pdata->has_micb_supply_en_gpio)
-		msm_cdc_pinctrl_select_active_state(pdata->micb_en_ctl);
 
 	device_id = slim_get_device_id(slim);
 	if (!device_id) {
@@ -1353,8 +1348,7 @@ static int wcd9xxx_slim_probe(struct slim_device *slim)
 	 * Vout_D to be ready after BUCK_SIDO is powered up.
 	 * SYS_RST_N shouldn't be pulled high during this time
 	 */
-	if (wcd9xxx->type == WCD9335 || wcd9xxx->type == WCD934X ||
-	    wcd9xxx->type == WCD9360)
+	if (wcd9xxx->type == WCD9335 || wcd9xxx->type == WCD934X)
 		usleep_range(600, 650);
 	else
 		usleep_range(5, 10);
@@ -1600,7 +1594,6 @@ static const struct slim_device_id wcd_slim_device_id[] = {
 	{"tomtom-slim-pgd", WCD9330},
 	{"tasha-slim-pgd", WCD9335},
 	{"tavil-slim-pgd", WCD934X},
-	{"pahu-slim-pgd", WCD9360},
 	{}
 };
 

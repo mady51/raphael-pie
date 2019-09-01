@@ -1,6 +1,4 @@
-/*
- * Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
- * Copyright (C) 2019 XiaoMi, Inc.
+/* Copyright (c) 2015-2018, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -11,7 +9,6 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-#define DEBUG
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/platform_device.h>
@@ -54,6 +51,7 @@
 #define TAVIL_MBHC_ZDET_CONST         (86 * 16384)
 #define TAVIL_MBHC_MOISTURE_RREF      R_24_KOHM
 
+#if IS_ENABLED(CONFIG_SND_SOC_WCD934X_MBHC)
 static struct wcd_mbhc_register
 	wcd_mbhc_registers[WCD_MBHC_REG_FUNC_MAX] = {
 	WCD_MBHC_REGISTER("WCD_MBHC_L_DET_EN",
@@ -169,6 +167,7 @@ static const struct wcd_mbhc_intr intr_ids = {
 static char on_demand_supply_name[][MAX_ON_DEMAND_SUPPLY_NAME_LENGTH] = {
 	"cdc-vdd-mic-bias",
 };
+#endif
 
 struct tavil_mbhc_zdet_param {
 	u16 ldo_ctl;
@@ -892,6 +891,7 @@ static const struct wcd_mbhc_cb mbhc_cb = {
 	.is_anc_on = tavil_is_anc_on,
 };
 
+#if IS_ENABLED(CONFIG_SND_SOC_WCD934X_MBHC)
 static struct regulator *tavil_codec_find_ondemand_regulator(
 		struct snd_soc_codec *codec, const char *name)
 {
@@ -910,6 +910,7 @@ static struct regulator *tavil_codec_find_ondemand_regulator(
 		name);
 	return NULL;
 }
+#endif
 
 static int tavil_get_hph_type(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
@@ -966,6 +967,8 @@ static const struct snd_kcontrol_new impedance_detect_controls[] = {
 		       tavil_hph_impedance_get, NULL),
 };
 
+#if IS_ENABLED(CONFIG_SND_SOC_WCD934X_MBHC)
+
 /*
  * tavil_mbhc_get_impedance: get impedance of headphone left and right channels
  * @wcd934x_mbhc: handle to struct wcd934x_mbhc *
@@ -988,28 +991,6 @@ int tavil_mbhc_get_impedance(struct wcd934x_mbhc *wcd934x_mbhc,
 	return wcd_mbhc_get_impedance(&wcd934x_mbhc->wcd_mbhc, zl, zr);
 }
 EXPORT_SYMBOL(tavil_mbhc_get_impedance);
-
-
-int tavil_mb_pull_down(struct snd_soc_codec *codec, bool active,
-		int value)
-{
-	int oldv = 0;
-
-	if (active) {
-		oldv = snd_soc_read(codec, WCD934X_ANA_MICB2);
-		snd_soc_update_bits(codec, WCD934X_ANA_MBHC_ELECT,
-				0x80, 0x00);
-		snd_soc_update_bits(codec, WCD934X_ANA_MICB2, 0xC0, 0xC0);
-	} else {
-		snd_soc_write(codec, WCD934X_ANA_MICB2, value);
-		snd_soc_update_bits(codec, WCD934X_ANA_MBHC_ELECT,
-				0x80, 0x80);
-	}
-
-	return oldv;
-}
-EXPORT_SYMBOL(tavil_mb_pull_down);
-
 
 /*
  * tavil_mbhc_hs_detect: starts mbhc insertion/removal functionality
@@ -1103,6 +1084,7 @@ int tavil_mbhc_init(struct wcd934x_mbhc **mbhc, struct snd_soc_codec *codec,
 	struct wcd934x_mbhc *wcd934x_mbhc;
 	struct wcd_mbhc *wcd_mbhc;
 	int ret;
+	struct wcd9xxx_pdata *pdata;
 
 	wcd934x_mbhc = devm_kzalloc(codec->dev, sizeof(struct wcd934x_mbhc),
 				    GFP_KERNEL);
@@ -1122,6 +1104,14 @@ int tavil_mbhc_init(struct wcd934x_mbhc **mbhc, struct snd_soc_codec *codec,
 
 	/* Setting default mbhc detection logic to ADC for Tavil */
 	wcd_mbhc->mbhc_detection_logic = WCD_DETECTION_ADC;
+
+	pdata = dev_get_platdata(codec->dev->parent);
+	if (!pdata) {
+		dev_err(codec->dev, "%s: pdata pointer is NULL\n", __func__);
+		ret = -EINVAL;
+		goto err;
+	}
+	wcd_mbhc->micb_mv = pdata->micbias.micb2_mv;
 
 	ret = wcd_mbhc_init(wcd_mbhc, codec, &mbhc_cb,
 				&intr_ids, wcd_mbhc_registers,
@@ -1175,3 +1165,4 @@ void tavil_mbhc_deinit(struct snd_soc_codec *codec)
 	}
 }
 EXPORT_SYMBOL(tavil_mbhc_deinit);
+#endif
