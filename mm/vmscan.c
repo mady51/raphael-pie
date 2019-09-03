@@ -3325,10 +3325,6 @@ static bool prepare_kswapd_sleep(pg_data_t *pgdat, int order, int classzone_idx)
 	if (need_resched())
 		return false;
 
-	/* If a direct reclaimer woke kswapd within HZ/10, it's premature */
-	if (remaining)
-		return false;
-
 	/*
 	 * The throttled processes are normally woken up in balance_pgdat() as
 	 * soon as allow_direct_reclaim() is true. But there is a potential
