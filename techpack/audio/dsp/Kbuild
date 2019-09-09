@@ -111,7 +111,6 @@ ifdef CONFIG_SND_SOC_MSM_QDSP6V2_INTF
 	Q6_OBJS += elliptic/io_modules/userspace/elliptic_data_userspace_ctrl.o
 endif
 
-endif
 ifdef CONFIG_DTS_SRS_TM
 	Q6_OBJS += msm-dts-srs-tm-config.o
 endif
